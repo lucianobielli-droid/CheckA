@@ -10,6 +10,10 @@ uploaded_file = st.sidebar.file_uploader("📂 Selecciona tu archivo CSV", type=
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
 
+    # --- Ajustes de Pandas para mostrar todas las columnas ---
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", None)
+
     # --- ORDENAR COLUMNAS: primero las seleccionadas, luego el resto ---
     selected_columns = [
         "m_e",
@@ -25,61 +29,54 @@ if uploaded_file is not None:
     other_columns = [col for col in df.columns if col not in selected_columns]
     df = df[[col for col in selected_columns if col in df.columns] + other_columns]
 
-    # --- RESALTAR FILAS DONDE QOH < required_part_quantity ---
-    def highlight_low_stock(row):
-        try:
-            qoh = float(row["QOH"])
-            req = float(row["required_part_quantity"])
-            if qoh < req:
-                return ["background-color: #ffcccc"] * len(row)  # rojo claro
-        except Exception:
-            pass
-        return [""] * len(row)
-
     # --- SELECTORES PRINCIPALES ---
     if "Mne_Dash8" in df.columns:
-        # Filtro con comodín
+        # Campo de búsqueda con comodín
         search_mne = st.sidebar.text_input("🔎 Filtrar Mne_Dash8 por comodín (ej: '123')")
+
+        # Lista completa de valores
+        todos_valores = sorted(df["Mne_Dash8"].unique())
+
+        # Filtrar según comodín
         if search_mne.strip():
-            posibles = sorted([val for val in df["Mne_Dash8"].unique() if search_mne.lower() in str(val).lower()])
+            posibles = [val for val in todos_valores if search_mne.lower() in str(val).lower()]
         else:
-            posibles = sorted(df["Mne_Dash8"].unique())
+            posibles = todos_valores
 
-        mne_valores = st.sidebar.multiselect("Selecciona uno o varios valores de Mne_Dash8", posibles)
-        search_text = st.sidebar.text_input("Buscar dentro de la tabla dinámica")
+        # Multiselect que mantiene selección
+        mne_valores = st.sidebar.multiselect(
+            "Selecciona uno o varios valores de Mne_Dash8",
+            options=posibles,
+            default=[]
+        )
 
+        # Filtrar el dataframe según selección
         filtered = df[df["Mne_Dash8"].isin(mne_valores)] if mne_valores else df.copy()
 
-        if search_text.strip():
-            mask = filtered.apply(lambda row: row.astype(str).str.contains(search_text, case=False).any(), axis=1)
-            filtered = filtered[mask]
-
-        # --- KPIs ---
-        col1, col2, col3 = st.columns(3)
-        col1.metric("📊 Total registros", len(filtered))
-        col2.metric("📑 Columnas", len(filtered.columns))
-        col3.metric("🔎 Valores únicos", filtered.nunique().sum())
-
-        # --- TABLA ORDENADA Y RESALTADA ---
+        # --- TABLA ORDENADA ---
         st.subheader("Tabla ordenada y resaltada")
-        st.dataframe(filtered.style.apply(highlight_low_stock, axis=1), use_container_width=True)
+        st.dataframe(filtered, use_container_width=True)
 
         # --- PANEL INDEPENDIENTE: Análisis de stock ---
         st.header("📊 Panel de análisis de stock")
 
         df_filtrado = df[df["Mne_Dash8"].isin(mne_valores)] if mne_valores else df.copy()
 
-        # Asegurar que las columnas numéricas sean números
+        # Asegurar numéricos
         for col_num in ["required_part_quantity", "QOH"]:
             if col_num in df_filtrado.columns:
                 df_filtrado[col_num] = pd.to_numeric(df_filtrado[col_num], errors="coerce").fillna(0)
 
-        # Agrupar por las columnas solicitadas y sumar cantidades
+        # Agrupar consolidando bins
         resumen = (
             df_filtrado.groupby(
-                ["m_e", "description", "manufacturer_part_number", "bin", "part_action", "item_type"],
+                ["m_e", "description", "manufacturer_part_number", "part_action", "item_type"],
                 as_index=False
-            ).agg({"required_part_quantity": "sum", "QOH": "sum"})
+            ).agg({
+                "required_part_quantity": "first",   # único por m_e
+                "QOH": "sum",                        # sumar stock
+                "bin": lambda x: ", ".join(sorted(x.unique()))  # concatenar bins
+            })
         )
 
         # Calcular faltante y estado
@@ -93,30 +90,38 @@ if uploaded_file is not None:
              "part_action", "item_type"]
         ]
 
-        # KPI global: total faltante
+        # KPI global
         total_faltante = float(resumen["faltante"].sum())
         st.metric("📦 Total faltante en selección", f"{total_faltante:,.0f}")
 
-        # --- RESALTAR FILAS DONDE FALTAN PIEZAS ---
+        # Resaltado de filas con faltante
         def highlight_faltante(row):
             if row["faltante"] > 0:
-                return ["background-color: #ffcccc"] * len(row)  # rojo claro
+                return ["background-color: #ffcccc"] * len(row)
             return [""] * len(row)
 
         st.subheader("Resumen de piezas para selección de Mne_Dash8")
         st.dataframe(resumen.style.apply(highlight_faltante, axis=1), use_container_width=True)
 
-        # Gráfico de barras para visualizar faltantes con etiquetas de estado
+        # --- DESCARGAS DE TABLA CONSOLIDADA ---
+        csv_resumen = resumen.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Descargar CSV consolidado", csv_resumen, "resumen_stock.csv", "text/csv")
+
+        excel_path = "resumen_stock.xlsx"
+        resumen.to_excel(excel_path, index=False)
+        st.download_button("📥 Descargar Excel consolidado", open(excel_path, "rb"), "resumen_stock.xlsx")
+
+        # Gráfico con etiquetas de estado y faltante
         fig_resumen = px.bar(
             resumen,
             x="m_e",
             y="faltante",
             color="estado",
             title="Faltante de piezas por m_e en selección de Mne_Dash8",
-            text="estado",  # etiqueta de texto encima de cada barra
+            text=resumen.apply(lambda r: f"{r['estado']} ({r['faltante']})", axis=1),
             hover_data=["description", "manufacturer_part_number", "bin"]
         )
-        fig_resumen.update_traces(textposition="outside")  # coloca las etiquetas fuera de la barra
+        fig_resumen.update_traces(textposition="outside")
         st.plotly_chart(fig_resumen, use_container_width=True)
 
 else:
