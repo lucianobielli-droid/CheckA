@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
+# --- LOGO UNITED AIRLINES ---
+st.image("https://upload.wikimedia.org/wikipedia/commons/6/6f/United_Airlines_logo.svg", width=200)
 st.title("Dashboard de materiales por Mne_Dash8")
 
 uploaded_file = st.file_uploader("📂 Selecciona tu archivo CSV", type=["csv"])
@@ -34,10 +36,14 @@ if uploaded_file is not None:
 
     # --- SELECTORES PRINCIPALES ---
     if "Mne_Dash8" in df.columns:
-        mne_valor = st.selectbox("Selecciona el valor de Mne_Dash8", sorted(df["Mne_Dash8"].unique()))
+        mne_valores = st.multiselect("Selecciona uno o varios valores de Mne_Dash8", sorted(df["Mne_Dash8"].unique()))
         search_text = st.text_input("Buscar dentro de la tabla dinámica")
 
-        filtered = df[df["Mne_Dash8"] == mne_valor]
+        if mne_valores:
+            filtered = df[df["Mne_Dash8"].isin(mne_valores)]
+        else:
+            filtered = df.copy()
+
         if search_text.strip():
             mask = filtered.apply(lambda row: row.astype(str).str.contains(search_text, case=False).any(), axis=1)
             filtered = filtered[mask]
@@ -81,11 +87,13 @@ if uploaded_file is not None:
         # --- PANEL INDEPENDIENTE: Análisis de stock ---
         st.header("📊 Panel de análisis de stock")
 
-        # Selector de Mne_Dash8
-        mne_dash8_valor = st.selectbox("Selecciona un valor de Mne_Dash8 para análisis de stock", sorted(df["Mne_Dash8"].unique()))
+        # Multiselect de Mne_Dash8
+        mne_dash8_valores = st.multiselect("Selecciona uno o varios valores de Mne_Dash8 para análisis de stock", sorted(df["Mne_Dash8"].unique()))
 
-        # Filtrar por el valor seleccionado
-        df_filtrado = df[df["Mne_Dash8"] == mne_dash8_valor]
+        if mne_dash8_valores:
+            df_filtrado = df[df["Mne_Dash8"].isin(mne_dash8_valores)]
+        else:
+            df_filtrado = df.copy()
 
         # Agrupar por m_e y sumar required_part_quantity y QOH
         resumen = (
@@ -108,11 +116,11 @@ if uploaded_file is not None:
 
         # KPI global: total faltante
         total_faltante = resumen["faltante"].sum()
-        st.metric("📦 Total faltante en este Mne_Dash8", total_faltante)
+        st.metric("📦 Total faltante en selección", total_faltante)
 
         # Mostrar tabla resumen
-        st.subheader(f"Resumen de piezas para Mne_Dash8 = {mne_dash8_valor}")
-        st.dataframe(resumen, use_container_width=True)
+        st.subheader("Resumen de piezas para selección de Mne_Dash8")
+        st.data_table(resumen)  # versión interactiva con scroll
 
         # Gráfico de barras para visualizar faltantes
         fig_resumen = px.bar(
@@ -120,12 +128,11 @@ if uploaded_file is not None:
             x="m_e",
             y="faltante",
             color="estado",
-            title=f"Faltante de piezas por m_e en Mne_Dash8 = {mne_dash8_valor}",
-            text="faltante"
+            title="Faltante de piezas por m_e en selección de Mne_Dash8",
+            text="faltante",
+            hover_data=["description", "manufacturer_part_number", "bin"]
         )
         st.plotly_chart(fig_resumen, use_container_width=True)
 
 else:
     st.info("👆 Sube un archivo CSV para comenzar")
-
-
