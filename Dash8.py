@@ -1,9 +1,26 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import os
 
-# --- LOGO UNITED AIRLINES ---
-st.image("https://upload.wikimedia.org/wikipedia/commons/6/6f/United_Airlines_logo.svg", width=200)
+# --- LOGO UNITED AIRLINES (local + fallback remoto PNG) ---
+# Coloca un archivo en: assets/united_logo.png
+logo_local_path = "assets/united_logo.png"
+logo_fallback_url = "https://www.freepnglogos.com/uploads/united-airlines-logo-png/united-airlines-logo-png-0.png"
+
+def show_logo(sidebar=False, width=200):
+    try:
+        if os.path.exists(logo_local_path):
+            (st.sidebar if sidebar else st).image(logo_local_path, width=width)
+        else:
+            (st.sidebar if sidebar else st).image(logo_fallback_url, width=width)
+    except Exception:
+        # En caso de error con la imagen remota, no rompe la app
+        pass
+
+# Muestra el logo arriba (puedes cambiar sidebar=True para colocarlo en la barra lateral)
+show_logo(sidebar=False, width=200)
+
 st.title("Dashboard de materiales por Mne_Dash8")
 
 uploaded_file = st.file_uploader("📂 Selecciona tu archivo CSV", type=["csv"])
@@ -28,21 +45,21 @@ if uploaded_file is not None:
     # --- RESALTAR FILAS DONDE QOH < required_part_quantity ---
     def highlight_low_stock(row):
         try:
-            if row["QOH"] < row["required_part_quantity"]:
+            # Asegura comparación numérica
+            qoh = float(row["QOH"])
+            req = float(row["required_part_quantity"])
+            if qoh < req:
                 return ["background-color: #ffcccc"] * len(row)  # rojo claro
         except Exception:
             pass
         return [""] * len(row)
 
-    # --- SELECTORES PRINCIPALES ---
+    # --- SELECTORES PRINCIPALES (multiselect) ---
     if "Mne_Dash8" in df.columns:
         mne_valores = st.multiselect("Selecciona uno o varios valores de Mne_Dash8", sorted(df["Mne_Dash8"].unique()))
         search_text = st.text_input("Buscar dentro de la tabla dinámica")
 
-        if mne_valores:
-            filtered = df[df["Mne_Dash8"].isin(mne_valores)]
-        else:
-            filtered = df.copy()
+        filtered = df[df["Mne_Dash8"].isin(mne_valores)] if mne_valores else df.copy()
 
         if search_text.strip():
             mask = filtered.apply(lambda row: row.astype(str).str.contains(search_text, case=False).any(), axis=1)
@@ -67,7 +84,7 @@ if uploaded_file is not None:
         st.download_button("📥 Descargar Excel", open(excel_path, "rb"), "tabla_filtrada.xlsx")
 
         # --- GRÁFICOS ---
-        columna = st.selectbox("Selecciona la columna para graficar", [c for c in filtered.columns if c not in ["Mne_Dash8"]])
+        columna = st.selectbox("Selecciona la columna para graficar", [c for c in filtered.columns if c != "Mne_Dash8"])
         tipo = st.selectbox("Selecciona el tipo de gráfico", ["Barras", "Pie Chart", "Línea"])
 
         conteo = filtered[columna].value_counts().reset_index()
@@ -77,25 +94,25 @@ if uploaded_file is not None:
             fig = px.bar(conteo, x=columna, y="Cantidad", title=f"Distribución de '{columna}'")
         elif tipo == "Pie Chart":
             fig = px.pie(conteo, names=columna, values="Cantidad", title=f"Distribución de '{columna}'")
-        elif tipo == "Línea":
-            fig = px.line(conteo, x=columna, y="Cantidad", title=f"Distribución de '{columna}'")
         else:
-            fig = px.histogram(filtered, x=columna, title=f"Distribución de '{columna}'")
+            fig = px.line(conteo, x=columna, y="Cantidad", title=f"Distribución de '{columna}'")
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- PANEL INDEPENDIENTE: Análisis de stock ---
+        # --- PANEL INDEPENDIENTE: Análisis de stock con multiselect ---
         st.header("📊 Panel de análisis de stock")
 
-        # Multiselect de Mne_Dash8
-        mne_dash8_valores = st.multiselect("Selecciona uno o varios valores de Mne_Dash8 para análisis de stock", sorted(df["Mne_Dash8"].unique()))
+        mne_dash8_valores = st.multiselect("Selecciona uno o varios valores de Mne_Dash8 para análisis de stock",
+                                           sorted(df["Mne_Dash8"].unique()))
 
-        if mne_dash8_valores:
-            df_filtrado = df[df["Mne_Dash8"].isin(mne_dash8_valores)]
-        else:
-            df_filtrado = df.copy()
+        df_filtrado = df[df["Mne_Dash8"].isin(mne_dash8_valores)] if mne_dash8_valores else df.copy()
 
-        # Agrupar por m_e y sumar required_part_quantity y QOH
+        # Asegura que las columnas numéricas estén como números
+        for col_num in ["required_part_quantity", "QOH"]:
+            if col_num in df_filtrado.columns:
+                df_filtrado[col_num] = pd.to_numeric(df_filtrado[col_num], errors="coerce").fillna(0)
+
+        # Agrupar por las columnas solicitadas y sumar cantidades
         resumen = (
             df_filtrado.groupby(
                 ["m_e", "description", "manufacturer_part_number", "bin", "part_action", "item_type"],
@@ -115,12 +132,12 @@ if uploaded_file is not None:
         ]
 
         # KPI global: total faltante
-        total_faltante = resumen["faltante"].sum()
-        st.metric("📦 Total faltante en selección", total_faltante)
+        total_faltante = float(resumen["faltante"].sum())
+        st.metric("📦 Total faltante en selección", f"{total_faltante:,.0f}")
 
         # Mostrar tabla resumen
         st.subheader("Resumen de piezas para selección de Mne_Dash8")
-        st.data_table(resumen)  # versión interactiva con scroll
+        st.dataframe(resumen, use_container_width=True)
 
         # Gráfico de barras para visualizar faltantes
         fig_resumen = px.bar(
