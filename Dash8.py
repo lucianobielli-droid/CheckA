@@ -89,13 +89,22 @@ if uploaded_file is not None:
 
         # Agrupar por m_e y sumar required_part_quantity y QOH
         resumen = (
-            df_filtrado.groupby("m_e", as_index=False)
-                       .agg({"required_part_quantity": "sum", "QOH": "sum"})
+            df_filtrado.groupby(
+                ["m_e", "description", "manufacturer_part_number", "bin", "part_action", "item_type"],
+                as_index=False
+            ).agg({"required_part_quantity": "sum", "QOH": "sum"})
         )
 
         # Calcular faltante y estado
         resumen["faltante"] = resumen["required_part_quantity"] - resumen["QOH"]
         resumen["estado"] = resumen["faltante"].apply(lambda x: "⚠️ Pedir piezas" if x > 0 else "✅ Stock suficiente")
+
+        # Reordenar columnas en el orden solicitado
+        resumen = resumen[
+            ["m_e", "description", "manufacturer_part_number", "bin",
+             "QOH", "required_part_quantity", "faltante",
+             "part_action", "item_type", "estado"]
+        ]
 
         # KPI global: total faltante
         total_faltante = resumen["faltante"].sum()
