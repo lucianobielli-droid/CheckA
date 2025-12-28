@@ -20,7 +20,7 @@ if uploaded_file is not None:
         "part_action",
         "item_type"
     ]
-    # Mantener las seleccionadas primero y luego el resto
+    # Mantener todas las columnas: primero las seleccionadas, luego las demás
     other_columns = [col for col in df.columns if col not in selected_columns]
     df = df[[col for col in selected_columns if col in df.columns] + other_columns]
 
@@ -34,11 +34,11 @@ if uploaded_file is not None:
         return [""] * len(row)
 
     # --- SELECTORES ---
-    if "m_e" in df.columns:
-        mne_valor = st.selectbox("Selecciona el valor de Mne_Dash8", sorted(df["m_e"].unique()))
+    if "Mne_Dash8" in df.columns:
+        mne_valor = st.selectbox("Selecciona el valor de Mne_Dash8", sorted(df["Mne_Dash8"].unique()))
         search_text = st.text_input("Buscar dentro de la tabla dinámica")
 
-        filtered = df[df["m_e"] == mne_valor]
+        filtered = df[df["Mne_Dash8"] == mne_valor]
         if search_text.strip():
             mask = filtered.apply(lambda row: row.astype(str).str.contains(search_text, case=False).any(), axis=1)
             filtered = filtered[mask]
@@ -62,7 +62,7 @@ if uploaded_file is not None:
         st.download_button("📥 Descargar Excel", open(excel_path, "rb"), "tabla_filtrada.xlsx")
 
         # --- GRÁFICOS ---
-        columna = st.selectbox("Selecciona la columna para graficar", [c for c in filtered.columns if c not in ["m_e"]])
+        columna = st.selectbox("Selecciona la columna para graficar", [c for c in filtered.columns if c not in ["Mne_Dash8"]])
         tipo = st.selectbox("Selecciona el tipo de gráfico", ["Barras", "Pie Chart", "Línea"])
 
         conteo = filtered[columna].value_counts().reset_index()
@@ -80,3 +80,4 @@ if uploaded_file is not None:
         st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("👆 Sube un archivo CSV para comenzar")
+
