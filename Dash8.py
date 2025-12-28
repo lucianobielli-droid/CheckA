@@ -75,7 +75,7 @@ if uploaded_file is not None:
             ).agg({
                 "required_part_quantity": "first",   # único por m_e
                 "QOH": "sum",                        # sumar stock
-                "bin": lambda x: ", ".join(sorted(x.unique()))  # concatenar bins
+                "bin": lambda x: ", ".join(sorted(str(v) for v in x.dropna().unique()))  # concatenar bins como texto
             })
         )
 
