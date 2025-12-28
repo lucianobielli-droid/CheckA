@@ -111,6 +111,21 @@ if uploaded_file is not None:
         resumen.to_excel(excel_path, index=False)
         st.download_button("📥 Descargar Excel consolidado", open(excel_path, "rb"), "resumen_stock.xlsx")
 
+        # --- DESCARGA SOLO PIEZAS FALTANTES ---
+        faltantes = resumen[resumen["faltante"] > 0]
+        if not faltantes.empty:
+            excel_faltantes = "piezas_faltantes.xlsx"
+            faltantes.to_excel(excel_faltantes, index=False)
+            st.download_button("📥 Descargar Excel con piezas faltantes", open(excel_faltantes, "rb"), "piezas_faltantes.xlsx")
+
+            # Generar texto automático para correo
+            solicitud = "Estimado proveedor,\n\nSolicito las siguientes piezas:\n\n"
+            for _, row in faltantes.iterrows():
+                solicitud += f"- {row['m_e']} ({row['description']}), faltan {row['faltante']} unidades.\n"
+            solicitud += "\nGracias,\n[Tu nombre]"
+
+            st.text_area("✉️ Texto para enviar por correo", solicitud, height=200)
+
         # Gráfico con etiquetas de estado y faltante
         fig_resumen = px.bar(
             resumen,
