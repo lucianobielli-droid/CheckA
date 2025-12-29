@@ -14,6 +14,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- CARGA CON CACHE ---
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
@@ -49,7 +50,7 @@ def apply_custom_styling(df):
         return df
     return df.style.apply(highlight_logic, axis=None)
 
-# --- UTILIDAD: FILTRAR COLUMNAS NO VACÍAS ---
+# --- FILTRAR COLUMNAS NO VACÍAS ---
 def filter_nonempty_columns(df, candidate_cols=None):
     if candidate_cols is None:
         candidate_cols = list(df.columns)
@@ -71,12 +72,12 @@ if file_stock and file_jobs:
     df_stock = load_data(file_stock)
     df_jobs = load_data(file_jobs)
 
-    # Tipificación numérica
+    # Tipificación numérica en stock
     for c in ['QOH','required_part_quantity','planned_quantity','Intransit_qty']:
         if c in df_stock.columns:
             df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
-    # Fecha de jobs
+    # Fecha en jobs
     if 'scheduled_date' in df_jobs.columns:
         df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date'], errors='coerce').dt.date
 
@@ -97,7 +98,7 @@ if file_stock and file_jobs:
     if 'm_e' in f_stock.columns and w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
-    # --- MÉTRICAS ---
+    # --- MÉTRICAS EN INVENTARIO ---
     if {'required_part_quantity','QOH'}.issubset(f_stock.columns):
         f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).fillna(0).astype(int)
     else:
@@ -172,7 +173,7 @@ if file_stock and file_jobs:
         f_stock_plan = f_stock_plan[f_stock_plan['Mne_Dash8_norm'] != ""]
 
         st.subheader(f"Tareas Programadas para hoy ({len(jobs_day)})")
-        show_jobs_cols = filter_nonempty_columns(jobs_day, ['mne_number', 'mne_description', 'package_description', 'scheduled_date'])
+        show_jobs_cols = filter_nonempty_columns(jobs_day, ['mne_number','mne_description','package_description','scheduled_date'])
         if len(show_jobs_cols) > 0 and len(jobs_day) > 0:
             st.dataframe(jobs_day[show_jobs_cols], use_container_width=True, hide_index=True)
 
@@ -188,11 +189,11 @@ if file_stock and file_jobs:
 
         if not mats_for_day.empty:
             # Elimina duplicados exactos para evitar doble conteo
-            dedup_subset_cols = [c for c in ['Mne_Dash8_norm', 'm_e', 'description', 'required_part_quantity', 'QOH', 'OPEN ORDERS', 'REQUISITO', 'bin'] if c in mats_for_day.columns]
+            dedup_subset_cols = [c for c in ['Mne_Dash8_norm','m_e','description','required_part_quantity','QOH','OPEN ORDERS','REQUISITO','bin'] if c in mats_for_day.columns]
             if len(dedup_subset_cols) > 0:
                 mats_for_day = mats_for_day.drop_duplicates(subset=dedup_subset_cols)
 
-            # Agrupar por MNE y Part Number, calcular métricas
+            # Agrupar por MNE y Part Number
             agg_dict = {}
             if 'description' in mats_for_day.columns: agg_dict['description'] = 'first'
             if 'QOH' in mats_for_day.columns: agg_dict['QOH'] = 'sum'
@@ -207,11 +208,14 @@ if file_stock and file_jobs:
             else:
                 mats_for_day_grouped = mats_for_day.copy()
 
-            # Recalcular métricas
-            mats_for_day_grouped['QOH'] = pd.to_numeric(mats_for_day_grouped.get('QOH', 0), errors='coerce').fillna(0).astype(int)
-            mats_for_day_grouped['required_part_quantity'] = pd.to_numeric(mats_for_day_grouped.get('required_part_quantity', 0), errors='coerce').fillna(0).astype(int)
-            mats_for_day_grouped['Intransit_qty'] = pd.to_numeric(mats_for_day_grouped.get('Intransit_qty', 0), errors='coerce').fillna(0).astype(int)
+            # Tipificación segura de columnas críticas
+            for col in ['QOH','required_part_quantity','Intransit_qty']:
+                if col in mats_for_day_grouped.columns:
+                    mats_for_day_grouped[col] = pd.to_numeric(mats_for_day_grouped[col], errors='coerce').fillna(0).astype(int)
+                else:
+                    mats_for_day_grouped[col] = 0
 
+            # Métricas
             mats_for_day_grouped['faltante'] = (mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']).clip(lower=0).astype(int)
             mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
             mats_for_day_grouped['stock_total_proyectado'] = (mats_for_day_grouped['QOH'] + mats_for_day_grouped['Intransit_qty']).astype(int)
@@ -229,16 +233,16 @@ if file_stock and file_jobs:
                 return "OK"
             mats_for_day_grouped['alerta_logistica'] = mats_for_day_grouped.apply(alerta_row, axis=1)
 
-            # Llenar vacíos amigables
-            mats_for_day_grouped = mats_for_day_grouped.fillna({'description':'','REQUISITO':'','bin':'','faltante':0,'Intransit_qty':0,'stock_total_proyectado':0,'alerta_logistica':'OK'})
+            # Llenado amigable
+            mats_for_day_grouped = mats_for_day_grouped.fillna({
+                'description':'', 'REQUISITO':'', 'bin':'',
+                'faltante':0, 'Intransit_qty':0, 'stock_total_proyectado':0, 'alerta_logistica':'OK'
+            })
 
-            # Selección columnas visibles y filtro no vacías
+            # Columnas visibles y filtro no vacías
             preferred_cols = [
-                'estado',
-                'Mne_Dash8_norm','Mne_Dash8',
-                'm_e','description','QOH','required_part_quantity',
-                'faltante','OPEN ORDERS','REQUISITO','bin',
-                'Intransit_qty','stock_total_proyectado','alerta_logistica'
+                'estado','Mne_Dash8_norm','Mne_Dash8','m_e','description','QOH','required_part_quantity',
+                'faltante','OPEN ORDERS','REQUISITO','bin','Intransit_qty','stock_total_proyectado','alerta_logistica'
             ]
             show_cols = filter_nonempty_columns(mats_for_day_grouped, preferred_cols)
 
@@ -287,16 +291,15 @@ if file_stock and file_jobs:
                 st.write("Muestras stock (raw vs norm):", f_stock_plan[['Mne_Dash8', 'Mne_Dash8_norm']].head(10))
             if 'mne_number' in jobs_day.columns:
                 st.write("Muestras jobs (raw vs norm):", jobs_day[['mne_number', 'mne_number_norm']].head(10))
-            if 'Mne_Dash8_norm' in f_stock_plan.columns:
+            if 'Mne_Dash8_norm' in f_stock_plan.columns and 'mne_number_norm' in jobs_day.columns:
                 st.write("Blancos stock Mne_Dash8_norm:", int((f_stock_plan['Mne_Dash8_norm'] == '').sum()))
                 st.write("Unique stock MNE_norm:", f_stock_plan['Mne_Dash8_norm'].nunique())
-            if 'mne_number_norm' in jobs_day.columns:
                 st.write("Blancos jobs mne_number_norm:", int((jobs_day['mne_number_norm'] == '').sum()))
                 st.write("Unique jobs MNE_norm (día):", jobs_day['mne_number_norm'].nunique())
-            mne_set_debug = set(jobs_day['mne_number_norm'].tolist())
-            inter = set(f_stock_plan['Mne_Dash8_norm']).intersection(mne_set_debug)
-            st.write("Intersección tamaño:", len(inter))
-            st.write("Ejemplos en intersección:", list(inter)[:10])
+                mne_set_debug = set(jobs_day['mne_number_norm'].tolist())
+                inter = set(f_stock_plan['Mne_Dash8_norm']).intersection(mne_set_debug)
+                st.write("Intersección tamaño:", len(inter))
+                st.write("Ejemplos en intersección:", list(inter)[:10])
 
     # --- TAB 2: STOCK COMPLETO ---
     with tab2:
