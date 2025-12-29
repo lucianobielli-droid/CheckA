@@ -54,7 +54,6 @@ def filter_nonempty_columns(df, candidate_cols=None):
     if candidate_cols is None:
         candidate_cols = list(df.columns)
     cols = [c for c in candidate_cols if c in df.columns]
-    # Considera strings vacíos como vacíos también
     def has_data(series):
         if series.dtype == 'object':
             return series.fillna('').astype(str).str.strip().ne('').any()
@@ -134,7 +133,7 @@ if file_stock and file_jobs:
     # --- TABS ---
     tab1, tab2, tab3 = st.tabs(["📅 PLANIFICADOR DIARIO", "📦 STOCK COMPLETO", "📈 GRÁFICO"])
 
-    # Config de columnas
+    # Config de columnas para Streamlit
     col_config = {
         "estado": st.column_config.TextColumn("ESTADO", width="small"),
         "Mne_Dash8": st.column_config.TextColumn("MNE (Dash8)", width="medium"),
@@ -173,22 +172,27 @@ if file_stock and file_jobs:
         f_stock_plan = f_stock_plan[f_stock_plan['Mne_Dash8_norm'] != ""]
 
         st.subheader(f"Tareas Programadas para hoy ({len(jobs_day)})")
-        show_jobs_cols = [c for c in ['mne_number', 'mne_description', 'package_description', 'scheduled_date'] if c in jobs_day.columns]
-        show_jobs_cols = filter_nonempty_columns(jobs_day, show_jobs_cols)
+        show_jobs_cols = filter_nonempty_columns(jobs_day, ['mne_number', 'mne_description', 'package_description', 'scheduled_date'])
         if len(show_jobs_cols) > 0 and len(jobs_day) > 0:
             st.dataframe(jobs_day[show_jobs_cols], use_container_width=True, hide_index=True)
 
         st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
-        mne_set = set(jobs_day['mne_number_norm'].tolist())
-        mats_for_day = f_stock_plan[f_stock_plan['Mne_Dash8_norm'].isin(mne_set)].copy()
+
+        # Subset por MNE del día (nunca cae al inventario completo)
+        if 'mne_number_norm' in jobs_day.columns and 'Mne_Dash8_norm' in f_stock_plan.columns:
+            mne_set = set(jobs_day['mne_number_norm'].dropna().tolist())
+            mne_set = {m for m in mne_set if m != "" and m.upper() != "NAN"}
+            mats_for_day = f_stock_plan[f_stock_plan['Mne_Dash8_norm'].isin(mne_set)].copy()
+        else:
+            mats_for_day = pd.DataFrame()
 
         if not mats_for_day.empty:
-            # Eliminar duplicados exactos para evitar doble conteo
+            # Elimina duplicados exactos para evitar doble conteo
             dedup_subset_cols = [c for c in ['Mne_Dash8_norm', 'm_e', 'description', 'required_part_quantity', 'QOH', 'OPEN ORDERS', 'REQUISITO', 'bin'] if c in mats_for_day.columns]
             if len(dedup_subset_cols) > 0:
                 mats_for_day = mats_for_day.drop_duplicates(subset=dedup_subset_cols)
 
-            # Agrupar por MNE y Part Number
+            # Agrupar por MNE y Part Number, calcular métricas
             agg_dict = {}
             if 'description' in mats_for_day.columns: agg_dict['description'] = 'first'
             if 'QOH' in mats_for_day.columns: agg_dict['QOH'] = 'sum'
@@ -198,25 +202,19 @@ if file_stock and file_jobs:
             if 'bin' in mats_for_day.columns:
                 agg_dict['bin'] = lambda x: ', '.join(sorted(set([str(v) for v in x if pd.notna(v)])))
 
-            mats_for_day_grouped = mats_for_day.groupby(['Mne_Dash8_norm','m_e'], as_index=False).agg(agg_dict) if {'Mne_Dash8_norm','m_e'}.issubset(mats_for_day.columns) else mats_for_day.copy()
+            if {'Mne_Dash8_norm','m_e'}.issubset(mats_for_day.columns):
+                mats_for_day_grouped = mats_for_day.groupby(['Mne_Dash8_norm','m_e'], as_index=False).agg(agg_dict)
+            else:
+                mats_for_day_grouped = mats_for_day.copy()
 
             # Recalcular métricas
-            if {'required_part_quantity','QOH'}.issubset(mats_for_day_grouped.columns):
-                mats_for_day_grouped['faltante'] = (pd.to_numeric(mats_for_day_grouped['required_part_quantity'], errors='coerce').fillna(0) -
-                                                    pd.to_numeric(mats_for_day_grouped['QOH'], errors='coerce').fillna(0)).clip(lower=0).astype(int)
-            else:
-                mats_for_day_grouped['faltante'] = 0
+            mats_for_day_grouped['QOH'] = pd.to_numeric(mats_for_day_grouped.get('QOH', 0), errors='coerce').fillna(0).astype(int)
+            mats_for_day_grouped['required_part_quantity'] = pd.to_numeric(mats_for_day_grouped.get('required_part_quantity', 0), errors='coerce').fillna(0).astype(int)
+            mats_for_day_grouped['Intransit_qty'] = pd.to_numeric(mats_for_day_grouped.get('Intransit_qty', 0), errors='coerce').fillna(0).astype(int)
 
+            mats_for_day_grouped['faltante'] = (mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']).clip(lower=0).astype(int)
             mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
-
-            if 'Intransit_qty' in mats_for_day.columns and 'QOH' in mats_for_day_grouped.columns:
-                intransit_group = mats_for_day.groupby(['Mne_Dash8_norm','m_e'])['Intransit_qty'].sum().reset_index()
-                mats_for_day_grouped = mats_for_day_grouped.merge(intransit_group, on=['Mne_Dash8_norm','m_e'], how='left')
-                mats_for_day_grouped['Intransit_qty'] = pd.to_numeric(mats_for_day_grouped['Intransit_qty'], errors='coerce').fillna(0).astype(int)
-                mats_for_day_grouped['stock_total_proyectado'] = (mats_for_day_grouped['QOH'] + mats_for_day_grouped['Intransit_qty']).astype(int)
-            else:
-                mats_for_day_grouped['Intransit_qty'] = 0
-                mats_for_day_grouped['stock_total_proyectado'] = mats_for_day_grouped['QOH'] if 'QOH' in mats_for_day_grouped.columns else 0
+            mats_for_day_grouped['stock_total_proyectado'] = (mats_for_day_grouped['QOH'] + mats_for_day_grouped['Intransit_qty']).astype(int)
 
             def alerta_row(row):
                 f = int(row.get('faltante', 0))
@@ -269,7 +267,6 @@ if file_stock and file_jobs:
                 )
             else:
                 st.info("No hay materiales en estado ⚠️ PEDIR para descargar.")
-
         else:
             if len(jobs_day) == 0:
                 st.warning("No hay tareas programadas para la fecha seleccionada.")
