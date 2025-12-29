@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from pandas.io.formats.style import Styler  # Import correcto
+from pandas.io.formats.style import Styler  # Import correcto para evitar AttributeError
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="United Airlines - Materials Dashboard", layout="wide")
@@ -61,12 +61,13 @@ if file_stock and file_jobs:
     # --- PREPARACIÓN GENERAL ---
     for c in ['QOH','required_part_quantity','planned_quantity','Intransit_qty']:
         if c in df_stock.columns:
-            df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
+            df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0)
+            # Si quieres enteros para mostrar:
+            df_stock[c] = df_stock[c].astype(int)
 
     if 'scheduled_date' in df_jobs.columns:
         df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date'], errors='coerce').dt.date
 
-    # Renombrar para consistencia
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
 
     # --- FILTROS INVENTARIO ---
@@ -92,7 +93,10 @@ if file_stock and file_jobs:
 
     if 'Intransit_qty' not in f_stock.columns:
         f_stock['Intransit_qty'] = 0
-    f_stock['stock_total_proyectado'] = f_stock['QOH'] + f_stock['Intransit_qty']
+    else:
+        f_stock['Intransit_qty'] = pd.to_numeric(f_stock['Intransit_qty'], errors='coerce').fillna(0).astype(int)
+
+    f_stock['stock_total_proyectado'] = (f_stock['QOH'] + f_stock['Intransit_qty']).astype(int)
 
     def alerta(row):
         f = int(row.get('faltante', 0))
@@ -176,6 +180,7 @@ if file_stock and file_jobs:
         else:
             st.info("No hay materiales en estado ⚠️ PEDIR para descargar.")
 
+        # Depuración opcional
         if debug_mode:
             st.markdown("### 🛠️ Depuración")
             st.write("Inventario (muestras):", f_stock.head(10))
@@ -189,7 +194,7 @@ if file_stock and file_jobs:
         else:
             df_gen = f_stock[v_cols].reset_index(drop=True)
             if len(df_gen) > 800:
-                st.warning(f"Mostrando {len(df_gen)} filas. Resaltado de color desactivado por volumen de datos.")
+                st.warning(f"Mostrando {len[df_gen]} filas. Resaltado de color desactivado por volumen de datos.")
                 st.dataframe(df_gen, use_container_width=True, column_config=col_config, hide_index=True)
             else:
                 st.dataframe(apply_custom_styling(df_gen), use_container_width=True, column_config=col_config, hide_index=True)
