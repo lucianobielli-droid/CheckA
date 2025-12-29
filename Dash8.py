@@ -115,7 +115,7 @@ if file_stock and file_jobs:
         "bin": st.column_config.TextColumn("BIN"),
     }
 
-    # --- TAB 1: PLANIFICADOR ---
+    # === BLOQUE PLANIFICADOR (corregido) ===
     with tab1:
         st.markdown('<p class="main-header">Filtrado por Tareas Programadas</p>', unsafe_allow_html=True)
 
@@ -144,21 +144,26 @@ if file_stock and file_jobs:
         mats_for_day = f_stock_plan[f_stock_plan['Mne_Dash8_norm'].isin(mne_set)].copy()
 
         if not mats_for_day.empty:
-            # Agrupar por Mne_Dash8 y Part Number, concatenando BINs únicos
+            dedup_subset_cols = [c for c in ['Mne_Dash8_norm', 'm_e', 'description', 'required_part_quantity', 'QOH', 'OPEN ORDERS', 'REQUISITO', 'bin'] if c in mats_for_day.columns]
+            mats_for_day = mats_for_day.drop_duplicates(subset=dedup_subset_cols)
+
             mats_for_day_grouped = (
                 mats_for_day.groupby(['Mne_Dash8_norm','m_e'], as_index=False)
                             .agg({
                                 'description': 'first',
                                 'QOH': 'sum',
-                                'required_part_quantity': 'sum',
+                                'required_part_quantity': 'max',   # clave: no sumar requerimientos duplicados
                                 'OPEN ORDERS': 'sum',
                                 'REQUISITO': 'first',
                                 'bin': lambda x: ', '.join(sorted(set([str(v) for v in x if pd.notna(v)])))
                             })
             )
 
-            mats_for_day_grouped['faltante'] = (mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']).clip(lower=0).astype(int)
-            mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+            if {'required_part_quantity','QOH'}.issubset(mats_for_day_grouped.columns):
+                mats_for_day_grouped['faltante'] = (
+                    mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']
+                ).clip(lower=0).astype(int)
+                mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
 
             show_cols = [c for c in v_cols if c in mats_for_day_grouped.columns]
             styled_mat = apply_custom_styling(mats_for_day_grouped[show_cols])
@@ -170,7 +175,6 @@ if file_stock and file_jobs:
             else:
                 st.warning("No hay materiales en el almacén vinculados a los MNE de esta fecha.")
 
-        # Depuración opcional
         if debug_mode:
             st.markdown("### 🛠️ Depuración de claves")
             if 'Mne_Dash8' in f_stock_plan.columns:
