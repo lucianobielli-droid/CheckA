@@ -22,11 +22,21 @@ def load_data(file):
     return df
 
 # --- NORMALIZACIÓN DE CLAVES ---
+# Ajusta estos flags según tu formato real
+KEEP_LEADING_ZEROS = True         # Pon False si NO deben compararse con ceros a la izquierda
+KEEP_HYPHENS = False              # Pon True si el guion '-' es significativo en tus MNE
+
 def norm_mne_series(s: pd.Series) -> pd.Series:
-    return (s.astype(str)
-              .str.upper()
-              .str.strip()
-              .str.replace(r"\s+", "", regex=True))
+    s = (s.astype(str)
+           .str.upper()
+           .str.strip()
+           .str.replace(r"\s+", "", regex=True))
+    if not KEEP_HYPHENS:
+        s = s.str.replace(r"[^A-Z0-9]", "", regex=True)  # quita todo lo no alfanumérico
+    # Si no queremos ceros a la izquierda, se remueven
+    if not KEEP_LEADING_ZEROS:
+        s = s.str.replace(r"^0+", "", regex=True)
+    return s
 
 # --- FUNCIÓN DE ESTILO ---
 def apply_custom_styling(df):
@@ -52,24 +62,28 @@ st.sidebar.title("Material Control")
 
 file_stock = st.sidebar.file_uploader("1️⃣ EZESTOCK_FINAL (CSV)", type=["csv"])
 file_jobs = st.sidebar.file_uploader("2️⃣ WPEZE_Filter (CSV)", type=["csv"])
+debug_mode = st.sidebar.checkbox("🛠️ Modo depuración", value=False)
 
 if file_stock and file_jobs:
     df_stock = load_data(file_stock)
     df_jobs = load_data(file_jobs)
 
     # --- PREPARACIÓN DE DATOS ---
+    # Normaliza claves para cruce
     df_stock['Mne_Dash8_norm'] = norm_mne_series(df_stock['Mne_Dash8'])
     df_jobs['mne_number_norm'] = norm_mne_series(df_jobs['mne_number'])
 
+    # Conversión numérica
     cols_num = ['QOH', 'required_part_quantity', 'planned_quantity']
     for c in cols_num:
         if c in df_stock.columns:
             df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
+    # Fechas y renombrados
     df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date']).dt.date
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
 
-    # --- FILTROS DE SIDEBAR ---
+    # --- FILTROS DE SIDEBAR (comodines) ---
     st.sidebar.header("🔍 Buscadores por Comodín")
     w_mne = st.sidebar.text_input("Filtrar por MNE (Dash8)")
     w_desc = st.sidebar.text_input("Filtrar por Descripción")
@@ -83,6 +97,7 @@ if file_stock and file_jobs:
     if w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
+    # Métricas de faltantes y estado
     f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
     f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
 
@@ -98,6 +113,8 @@ if file_stock and file_jobs:
         "QOH": st.column_config.NumberColumn("STOCK ACT.", format="%d"),
         "faltante": st.column_config.NumberColumn("FALTANTE", format="%d"),
         "OPEN ORDERS": st.column_config.NumberColumn("O. ORDERS", format="%d"),
+        "REQUISITO": st.column_config.TextColumn("REQUISITO"),
+        "bin": st.column_config.TextColumn("BIN"),
     }
 
     # --- TAB 1: PLANIFICADOR ---
@@ -109,18 +126,21 @@ if file_stock and file_jobs:
         jobs_day = df_jobs[df_jobs['scheduled_date'] == sel_date].copy() if sel_date else df_jobs.iloc[0:0].copy()
 
         st.subheader(f"Tareas Programadas para hoy ({len(jobs_day)})")
-        st.dataframe(jobs_day[['mne_number', 'mne_description', 'package_description']], use_container_width=True, hide_index=True)
-
-        st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
-        mats_for_day = (
-            f_stock.merge(
-                jobs_day[['mne_number_norm']].drop_duplicates(),
-                left_on='Mne_Dash8_norm',
-                right_on='mne_number_norm',
-                how='inner'
-            )
+        st.dataframe(
+            jobs_day[['mne_number', 'mne_description', 'package_description']],
+            use_container_width=True, hide_index=True
         )
 
+        st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
+        # Cruce determinista con merge sobre claves normalizadas
+        mats_for_day = f_stock.merge(
+            jobs_day[['mne_number_norm']].drop_duplicates(),
+            left_on='Mne_Dash8_norm',
+            right_on='mne_number_norm',
+            how='inner'
+        )
+
+        # Cálculo en subset
         if not mats_for_day.empty:
             mats_for_day['faltante'] = (mats_for_day['required_part_quantity'] - mats_for_day['QOH']).clip(lower=0).astype(int)
             mats_for_day['estado'] = mats_for_day['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
@@ -132,6 +152,18 @@ if file_stock and file_jobs:
                 st.warning("No hay tareas programadas para la fecha seleccionada.")
             else:
                 st.warning("No hay materiales en el almacén vinculados a los MNE de esta fecha.")
+
+        # --- DEPURACIÓN OPCIONAL ---
+        if debug_mode:
+            st.markdown("### 🛠️ Depuración de claves")
+            st.write("Muestras de stock (raw vs norm):", f_stock[['Mne_Dash8', 'Mne_Dash8_norm']].head(10))
+            st.write("Muestras de jobs (raw vs norm):", jobs_day[['mne_number', 'mne_number_norm']].head(10))
+            st.write("Unique stock MNE_norm:", f_stock['Mne_Dash8_norm'].nunique())
+            st.write("Unique jobs MNE_norm (día):", jobs_day['mne_number_norm'].nunique())
+            # Cuántos MNE del día están en el stock
+            in_stock_mask = jobs_day['mne_number_norm'].isin(f_stock['Mne_Dash8_norm'])
+            st.write("MNE del día presentes en stock:", jobs_day.loc[in_stock_mask, 'mne_number_norm'].unique().tolist())
+            st.write("MNE del día ausentes en stock:", jobs_day.loc[~in_stock_mask, 'mne_number_norm'].unique().tolist())
 
     # --- TAB 2: STOCK COMPLETO ---
     with tab2:
