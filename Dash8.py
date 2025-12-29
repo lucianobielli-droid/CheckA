@@ -61,9 +61,7 @@ if file_stock and file_jobs:
     # --- PREPARACIÓN GENERAL ---
     for c in ['QOH','required_part_quantity','planned_quantity','Intransit_qty']:
         if c in df_stock.columns:
-            df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0)
-            # Si quieres enteros para mostrar:
-            df_stock[c] = df_stock[c].astype(int)
+            df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
     if 'scheduled_date' in df_jobs.columns:
         df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date'], errors='coerce').dt.date
@@ -85,17 +83,9 @@ if file_stock and file_jobs:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
     # --- MÉTRICAS ---
-    if {'required_part_quantity','QOH'}.issubset(f_stock.columns):
-        f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
-    else:
-        f_stock['faltante'] = 0
+    f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).fillna(0).astype(int)
     f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
-
-    if 'Intransit_qty' not in f_stock.columns:
-        f_stock['Intransit_qty'] = 0
-    else:
-        f_stock['Intransit_qty'] = pd.to_numeric(f_stock['Intransit_qty'], errors='coerce').fillna(0).astype(int)
-
+    f_stock['Intransit_qty'] = pd.to_numeric(f_stock.get('Intransit_qty', 0), errors='coerce').fillna(0).astype(int)
     f_stock['stock_total_proyectado'] = (f_stock['QOH'] + f_stock['Intransit_qty']).astype(int)
 
     def alerta(row):
@@ -156,11 +146,83 @@ if file_stock and file_jobs:
             st.dataframe(jobs_day[show_jobs_cols], use_container_width=True, hide_index=True)
 
         st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
-        df_plan = f_stock[v_cols].reset_index(drop=True)
-        st.dataframe(apply_custom_styling(df_plan), use_container_width=True, column_config=col_config, hide_index=True)
+        # Subset por MNE del día (si existe columna mne_number en jobs y Mne_Dash8 en stock)
+        if 'mne_number' in jobs_day.columns and 'Mne_Dash8' in f_stock.columns:
+            # Normalización simple para cruce
+            mne_jobs_norm = jobs_day['mne_number'].astype(str).str.upper().str.strip().str.replace(r"\s+", "", regex=True)
+            mne_stock_norm = f_stock['Mne_Dash8'].astype(str).str.upper().str.strip().str.replace(r"\s+", "", regex=True)
+            mne_set = set(mne_jobs_norm.dropna().tolist())
+            f_stock = f_stock.assign(Mne_Dash8_norm=mne_stock_norm)
+            f_plan = f_stock[f_stock['Mne_Dash8_norm'].isin(mne_set)].copy()
+        else:
+            f_plan = f_stock.copy()
+
+        # Agrupar por MNE + Part Number y calcular métricas limpias
+        group_keys = [k for k in ['Mne_Dash8_norm','m_e'] if k in f_plan.columns]
+        if len(group_keys) == 0:
+            group_keys = [k for k in ['Mne_Dash8','m_e'] if k in f_plan.columns]
+
+        agg_dict = {
+            'description': 'first',
+            'QOH': 'sum',
+            'required_part_quantity': 'max',   # evita doble conteo del requerimiento
+            'OPEN ORDERS': 'sum',
+            'REQUISITO': 'first',
+            'Intransit_qty': 'sum',
+        }
+        if 'bin' in f_plan.columns:
+            agg_dict['bin'] = lambda x: ', '.join(sorted(set([str(v) for v in x if pd.notna(v)])))
+
+        mats_for_day_grouped = f_plan.groupby(group_keys, as_index=False).agg(agg_dict)
+
+        # Recalcular y limpiar métricas
+        mats_for_day_grouped['QOH'] = pd.to_numeric(mats_for_day_grouped['QOH'], errors='coerce').fillna(0).astype(int)
+        mats_for_day_grouped['required_part_quantity'] = pd.to_numeric(mats_for_day_grouped['required_part_quantity'], errors='coerce').fillna(0).astype(int)
+        mats_for_day_grouped['Intransit_qty'] = pd.to_numeric(mats_for_day_grouped['Intransit_qty'], errors='coerce').fillna(0).astype(int)
+
+        mats_for_day_grouped['faltante'] = (mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']).clip(lower=0).fillna(0).astype(int)
+        mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+        mats_for_day_grouped['stock_total_proyectado'] = (mats_for_day_grouped['QOH'] + mats_for_day_grouped['Intransit_qty']).astype(int)
+
+        def alerta_row(row):
+            f = int(row.get('faltante', 0))
+            tr = int(row.get('Intransit_qty', 0))
+            if f > 0:
+                if tr >= f:
+                    return "✅ EN CAMINO (Cubre faltante)"
+                elif tr > 0:
+                    return "⚠️ PEDIR (Tránsito insuficiente)"
+                else:
+                    return "⚠️ PEDIR"
+            return "OK"
+
+        mats_for_day_grouped['alerta_logistica'] = mats_for_day_grouped.apply(alerta_row, axis=1)
+
+        # Fillna para evitar NaN en la tabla
+        mats_for_day_grouped = mats_for_day_grouped.fillna({
+            'description': '',
+            'REQUISITO': '',
+            'bin': '',
+            'faltante': 0,
+            'Intransit_qty': 0,
+            'stock_total_proyectado': 0,
+            'alerta_logistica': 'OK'
+        })
+
+        show_cols = [c for c in [
+            'estado',
+            'Mne_Dash8_norm' if 'Mne_Dash8_norm' in mats_for_day_grouped.columns else 'Mne_Dash8',
+            'm_e','description','QOH','required_part_quantity',
+            'faltante','OPEN ORDERS','REQUISITO','bin',
+            'Intransit_qty','stock_total_proyectado','alerta_logistica'
+        ] if c in mats_for_day_grouped.columns]
+
+        styled_mat = apply_custom_styling(mats_for_day_grouped[show_cols])
+        st.dataframe(styled_mat, use_container_width=True, column_config=col_config, hide_index=True)
+        st.info(f"Se encontraron {len(mats_for_day_grouped)} materiales agrupados para el plan.")
 
         # Descargas del planificador
-        csv_all = df_plan.to_csv(index=False).encode('utf-8')
+        csv_all = mats_for_day_grouped[show_cols].to_csv(index=False).encode('utf-8')
         st.download_button(
             label="⬇️ Descargar materiales del planificador (CSV)",
             data=csv_all,
@@ -168,9 +230,9 @@ if file_stock and file_jobs:
             mime="text/csv"
         )
 
-        to_order = df_plan[df_plan['alerta_logistica'].str.contains("PEDIR", na=False)]
+        to_order = mats_for_day_grouped[mats_for_day_grouped['alerta_logistica'].str.contains("PEDIR", na=False)]
         if not to_order.empty:
-            csv_order = to_order.to_csv(index=False).encode('utf-8')
+            csv_order = to_order[show_cols].to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="⬇️ Descargar materiales a pedir (CSV)",
                 data=csv_order,
@@ -183,8 +245,10 @@ if file_stock and file_jobs:
         # Depuración opcional
         if debug_mode:
             st.markdown("### 🛠️ Depuración")
-            st.write("Inventario (muestras):", f_stock.head(10))
-            st.write("Jobs (muestras):", df_jobs.head(10))
+            st.write("Jobs (muestras):", df_jobs.head(8))
+            st.write("Stock (muestras):", f_stock.head(8))
+            if 'Mne_Dash8_norm' in f_stock.columns:
+                st.write("Claves MNE norm (stock):", f_stock['Mne_Dash8_norm'].dropna().unique()[:10])
 
     # --- TAB 2: STOCK COMPLETO ---
     with tab2:
@@ -195,9 +259,9 @@ if file_stock and file_jobs:
             df_gen = f_stock[v_cols].reset_index(drop=True)
             if len(df_gen) > 800:
                 st.warning(f"Mostrando {len(df_gen)} filas. Resaltado de color desactivado por volumen de datos.")
-                st.dataframe(df_gen, use_container_width=True, column_config=col_config, hide_index=True)
+                st.dataframe(df_gen.fillna({'description':'','REQUISITO':'','bin':''}), use_container_width=True, column_config=col_config, hide_index=True)
             else:
-                st.dataframe(apply_custom_styling(df_gen), use_container_width=True, column_config=col_config, hide_index=True)
+                st.dataframe(apply_custom_styling(df_gen.fillna({'description':'','REQUISITO':'','bin':''})), use_container_width=True, column_config=col_config, hide_index=True)
 
             # Descarga del inventario filtrado
             csv_stock = df_gen.to_csv(index=False).encode('utf-8')
@@ -217,8 +281,13 @@ if file_stock and file_jobs:
             if not df_plot.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(x=df_plot['m_e'], y=df_plot['QOH'], name='Stock Actual', marker_color='#005DAA'))
-                fig.add_trace(go.Scatter(x=df_plot['m_e'], y=df_plot['required_part_quantity'], mode='markers', name='Requerido',
-                                         marker=dict(symbol='star', size=12, color='orange')))
+                fig.add_trace(go.Scatter(
+                    x=df_plot['m_e'],
+                    y=df_plot['required_part_quantity'],
+                    mode='markers',
+                    name='Requerido',
+                    marker=dict(symbol='star', size=12, color='orange')
+                ))
                 fig.update_layout(xaxis_title="Part Number", yaxis_title="Cantidad", template="plotly_white")
                 st.plotly_chart(fig, use_container_width=True)
             else:
