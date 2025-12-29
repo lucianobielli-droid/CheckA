@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 
@@ -21,7 +20,6 @@ def load_data(file):
 
 def to_excel(df):
     output = BytesIO()
-    # Intenta usar xlsxwriter, si falla usa openpyxl (por defecto en pandas moderno)
     try:
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='Data')
@@ -29,6 +27,32 @@ def to_excel(df):
         with pd.ExcelWriter(output) as writer:
             df.to_excel(writer, index=False, sheet_name='Data')
     return output.getvalue()
+
+# --- FUNCIÓN DE ESTILO VECTORIZADA (OPTIMIZADA) ---
+def highlight_vectorized(data):
+    # Creamos un DataFrame de estilos con la misma forma que 'data', lleno de strings vacíos
+    df_styles = pd.DataFrame('', index=data.index, columns=data.columns)
+    
+    # 1. Definimos las máscaras (Condiciones lógicas para toda la tabla)
+    # Faltante CRÍTICO: Faltante > Stock Actual Y Faltante > 0
+    mask_critical = (data['faltante'] > data['QOH']) & (data['faltante'] > 0)
+    
+    # Faltante REGULAR: Hay faltante pero no es mayor al stock (o es el resto de casos positivos)
+    # Nota: Si prefieres que sea solo "Faltante > 0", ajustamos la lógica. 
+    # Aquí: Amarillos son los que faltan pero NO son críticos.
+    mask_warning = (data['faltante'] > 0) & (~mask_critical)
+    
+    # 2. Definimos los estilos CSS
+    style_critical = 'background-color: #ffcccc; color: #b30000; font-weight: bold'
+    style_warning = 'background-color: #fff4e5'
+    
+    # 3. Aplicamos el estilo a TODAS las columnas para las filas que cumplen la máscara
+    # Esto es 100 veces más rápido que iterar fila por fila
+    for col in df_styles.columns:
+        df_styles.loc[mask_critical, col] = style_critical
+        df_styles.loc[mask_warning, col] = style_warning
+        
+    return df_styles
 
 # --- SIDEBAR ---
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/en/thumb/e/e0/United_Airlines_Logo.svg/1200px-United_Airlines_Logo.svg.png", width=200)
@@ -42,31 +66,26 @@ if file_stock and file_jobs:
     df_jobs = load_data(file_jobs)
 
     # --- LIMPIEZA DE DATOS ---
-    # 1. Limpiar espacios en blanco en las columnas clave para asegurar el cruce
     df_stock['Mne_Dash8'] = df_stock['Mne_Dash8'].astype(str).str.strip()
     df_jobs['mne_number'] = df_jobs['mne_number'].astype(str).str.strip()
     
-    # 2. Convertir numéricos y rellenar nulos
     cols_num = ['QOH', 'required_part_quantity', 'planned_quantity']
     for c in cols_num:
         if c in df_stock.columns:
             df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
     df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date']).dt.date
-    
-    # 3. Renombrar columnas
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
 
-    # --- BARRA LATERAL: BUSCADORES ---
+    # --- BUSCADORES ---
     st.sidebar.header("🔍 Buscadores (Comodín)")
     w_mne = st.sidebar.text_input("Filtrar por MNE (Dash8)")
     w_desc = st.sidebar.text_input("Filtrar por Descripción")
     w_me = st.sidebar.text_input("Filtrar por Part Number (m_e)")
 
-    # --- LÓGICA DE FILTRADO Y CÁLCULO ---
+    # --- LÓGICA DE FILTRADO ---
     f_stock = df_stock.copy()
     
-    # Aplicar filtros si existen
     if w_mne:
         f_stock = f_stock[f_stock['Mne_Dash8'].str.contains(w_mne, case=False, na=False)]
     if w_desc:
@@ -74,45 +93,15 @@ if file_stock and file_jobs:
     if w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
-    # Cálculos
     f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
-    
-    # Definir estado básico para lógica interna
-    def get_status(row):
-        if row['faltante'] > 0:
-            return "⚠️ PEDIR"
-        return "✅ OK"
-    f_stock['estado'] = f_stock.apply(get_status, axis=1)
+    f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
 
-    # Columnas a mostrar
+    # Orden de columnas
     v_cols = ['estado', 'm_e', 'description', 'QOH', 'required_part_quantity', 'faltante', 'OPEN ORDERS', 'REQUISITO', 'bin']
-
-    # --- FUNCIÓN DE RESALTADO (STYLE) ---
-    def highlight_rows(row):
-        # Creamos una lista de estilos vacía del mismo tamaño que la fila
-        styles = [''] * len(row)
-        
-        # Obtenemos valores de forma segura
-        faltante = row.get('faltante', 0)
-        qoh = row.get('QOH', 0)
-        
-        # CRITERIO 1: Faltante CRÍTICO (Faltante mayor que lo que tengo en mano)
-        # Nota: La lógica "faltante > QOH" implica que necesitas más de lo que tienes.
-        # Si 'faltante' ya es (Requerido - QOH), entonces si faltante > 0 ya es un problema.
-        # Pero si pides resaltar ESPECÍFICAMENTE cuando el hueco es mayor al stock actual:
-        if faltante > qoh and faltante > 0:
-            return ['background-color: #ffcccc; color: #b30000; font-weight: bold'] * len(row)
-        
-        # CRITERIO 2: Simplemente hay faltante
-        elif faltante > 0:
-            return ['background-color: #fff4e5'] * len(row)
-            
-        return styles
 
     # --- PESTAÑAS ---
     tab1, tab2, tab3 = st.tabs(["📅 Planificador", "📦 Stock General", "📈 Gráfico Interactivo"])
 
-    # Configuración visual de columnas
     col_config = {
         "estado": st.column_config.TextColumn("ESTADO", width="small"),
         "m_e": st.column_config.TextColumn("PART NUMBER (m_e)", width="medium"),
@@ -128,80 +117,64 @@ if file_stock and file_jobs:
     # --- TAB 1: PLANIFICADOR ---
     with tab1:
         st.markdown('<p class="main-header">📅 Trabajos y Materiales</p>', unsafe_allow_html=True)
-        
         fechas = sorted(df_jobs['scheduled_date'].unique())
         sel_date = st.date_input("Selecciona Fecha:", value=fechas[0] if fechas else None)
 
-        # 1. Trabajos del día
         jobs_day = df_jobs[df_jobs['scheduled_date'] == sel_date].copy()
-        
-        # Filtro adicional por descripción en trabajos
         if w_desc:
             jobs_day = jobs_day[jobs_day['mne_description'].str.contains(w_desc, case=False, na=False)]
 
-        st.subheader(f"Actividades Programadas ({len(jobs_day)})")
-        st.dataframe(jobs_day[['mne_number', 'mne_description', 'package_description']], use_container_width=True)
+        st.subheader(f"Actividades ({len(jobs_day)})")
+        st.dataframe(jobs_day[['mne_number', 'mne_description', 'package_description']], use_container_width=True, hide_index=True)
 
-        # 2. Materiales (Cruce)
         st.subheader("📦 Materiales Requeridos")
-        
-        # Obtener lista de MNEs de los trabajos visibles
         mne_list = jobs_day['mne_number'].unique()
-        
-        # Filtrar stock usando esos MNEs (y respetando los filtros de la sidebar)
-        # Nota: Usamos f_stock para que ya tenga los filtros de texto aplicados si el usuario quiere refinar
         mat_hoy = f_stock[f_stock['Mne_Dash8'].isin(mne_list)].copy()
 
         if not mat_hoy.empty:
-            # IMPORTANTE: reset_index(drop=True) evita el error de StreamlitAPIException
+            # APLICAMOS EL ESTILO VECTORIZADO (axis=None)
+            # Esto evita el error de StreamlitAPIException
             st.dataframe(
-                mat_hoy[v_cols].reset_index(drop=True).style.apply(highlight_rows, axis=1), 
+                mat_hoy[v_cols].reset_index(drop=True).style.apply(highlight_vectorized, axis=None), 
                 use_container_width=True, 
-                column_config=col_config
+                column_config=col_config,
+                hide_index=True
             )
         else:
-            st.info("No se encontraron materiales en stock asociados a estos códigos MNE.")
+            st.info("No hay materiales en stock para estos trabajos.")
 
     # --- TAB 2: STOCK GENERAL ---
     with tab2:
         st.markdown('<p class="main-header">📦 Análisis de Inventario</p>', unsafe_allow_html=True)
-        # Reset index para evitar el crash
+        # Aquí también usamos el estilo vectorizado
         st.dataframe(
-            f_stock[v_cols].reset_index(drop=True).style.apply(highlight_rows, axis=1), 
+            f_stock[v_cols].reset_index(drop=True).style.apply(highlight_vectorized, axis=None), 
             use_container_width=True, 
-            column_config=col_config
+            column_config=col_config,
+            hide_index=True
         )
 
     # --- TAB 3: GRÁFICO ---
     with tab3:
         st.markdown('<p class="main-header">📈 Comparativa Visual</p>', unsafe_allow_html=True)
-        
-        # Usamos los datos filtrados
         df_plot = f_stock.copy().head(40)
         
         if not df_plot.empty:
             fig = go.Figure()
-            
             fig.add_trace(go.Bar(
                 x=df_plot['m_e'], y=df_plot['QOH'],
                 name='Stock Actual', marker_color='#005DAA',
                 text=df_plot['QOH'], textposition='auto'
             ))
-            
             fig.add_trace(go.Scatter(
                 x=df_plot['m_e'], y=df_plot['required_part_quantity'],
                 mode='markers', name='Requerido',
                 marker=dict(symbol='star', size=15, color='#FF8C00', line=dict(width=1, color='black'))
             ))
-
-            fig.update_layout(
-                title="Top 40 Items Filtrados",
-                xaxis_title="Part Number", yaxis_title="Cantidad",
-                template="plotly_white", height=500
-            )
+            fig.update_layout(title="Top 40 Items Filtrados", xaxis_title="Part Number", yaxis_title="Cantidad", template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("No hay datos para mostrar con los filtros actuales.")
+            st.warning("Sin datos para mostrar.")
 
 else:
-    st.info("👈 Carga los archivos CSV en la barra lateral.")
+    st.info("👈 Carga los archivos CSV.")
