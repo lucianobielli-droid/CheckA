@@ -88,7 +88,6 @@ if file_stock and file_jobs:
     if 'm_e' in f_stock.columns and w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
-    # Métricas inventario
     if {'required_part_quantity','QOH'}.issubset(f_stock.columns):
         f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
         f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
@@ -115,7 +114,7 @@ if file_stock and file_jobs:
         "bin": st.column_config.TextColumn("BIN"),
     }
 
-    # === BLOQUE PLANIFICADOR (corregido) ===
+    # --- TAB 1: PLANIFICADOR ---
     with tab1:
         st.markdown('<p class="main-header">Filtrado por Tareas Programadas</p>', unsafe_allow_html=True)
 
@@ -144,31 +143,50 @@ if file_stock and file_jobs:
         mats_for_day = f_stock_plan[f_stock_plan['Mne_Dash8_norm'].isin(mne_set)].copy()
 
         if not mats_for_day.empty:
+            # Elimina duplicados exactos para evitar doble conteo de requerimientos
             dedup_subset_cols = [c for c in ['Mne_Dash8_norm', 'm_e', 'description', 'required_part_quantity', 'QOH', 'OPEN ORDERS', 'REQUISITO', 'bin'] if c in mats_for_day.columns]
             mats_for_day = mats_for_day.drop_duplicates(subset=dedup_subset_cols)
 
+            # Agrupar por MNE y Part Number, concatenando BINs y usando max para requerimiento
             mats_for_day_grouped = (
                 mats_for_day.groupby(['Mne_Dash8_norm','m_e'], as_index=False)
                             .agg({
                                 'description': 'first',
                                 'QOH': 'sum',
-                                'required_part_quantity': 'max',   # clave: no sumar requerimientos duplicados
+                                'required_part_quantity': 'max',
                                 'OPEN ORDERS': 'sum',
                                 'REQUISITO': 'first',
                                 'bin': lambda x: ', '.join(sorted(set([str(v) for v in x if pd.notna(v)])))
                             })
             )
 
-            if {'required_part_quantity','QOH'}.issubset(mats_for_day_grouped.columns):
-                mats_for_day_grouped['faltante'] = (
-                    mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']
-                ).clip(lower=0).astype(int)
-                mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+            mats_for_day_grouped['faltante'] = (mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']).clip(lower=0).astype(int)
+            mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
 
             show_cols = [c for c in v_cols if c in mats_for_day_grouped.columns]
             styled_mat = apply_custom_styling(mats_for_day_grouped[show_cols])
             st.dataframe(styled_mat, use_container_width=True, column_config=col_config, hide_index=True)
-            st.info(f"Se encontraron {len(mats_for_day_grouped)} materiales agrupados por MNE.")
+
+            # Botones de descarga: todos y a pedir
+            csv_all = mats_for_day_grouped.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="⬇️ Descargar materiales del planificador (CSV)",
+                data=csv_all,
+                file_name=f"materiales_planificador_{sel_date}.csv",
+                mime="text/csv"
+            )
+
+            to_order = mats_for_day_grouped[mats_for_day_grouped['estado'] == "⚠️ PEDIR"]
+            if not to_order.empty:
+                csv_order = to_order.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="⬇️ Descargar materiales a pedir (CSV)",
+                    data=csv_order,
+                    file_name=f"materiales_a_pedir_{sel_date}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("No hay materiales en estado ⚠️ PEDIR para descargar.")
         else:
             if len(jobs_day) == 0:
                 st.warning("No hay tareas programadas para la fecha seleccionada.")
@@ -201,6 +219,15 @@ if file_stock and file_jobs:
                 st.dataframe(df_gen, use_container_width=True, column_config=col_config, hide_index=True)
             else:
                 st.dataframe(apply_custom_styling(df_gen), use_container_width=True, column_config=col_config, hide_index=True)
+
+            # Botón de descarga del inventario filtrado
+            csv_stock = df_gen.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="⬇️ Descargar inventario filtrado (CSV)",
+                data=csv_stock,
+                file_name="inventario_filtrado.csv",
+                mime="text/csv"
+            )
 
     # --- TAB 3: GRÁFICO ---
     with tab3:
