@@ -194,7 +194,7 @@ if file_stock and file_jobs:
         else:
             df_gen = f_stock[v_cols].reset_index(drop=True)
             if len(df_gen) > 800:
-                st.warning(f"Mostrando {len[df_gen]} filas. Resaltado de color desactivado por volumen de datos.")
+                st.warning(f"Mostrando {len(df_gen)} filas. Resaltado de color desactivado por volumen de datos.")
                 st.dataframe(df_gen, use_container_width=True, column_config=col_config, hide_index=True)
             else:
                 st.dataframe(apply_custom_styling(df_gen), use_container_width=True, column_config=col_config, hide_index=True)
