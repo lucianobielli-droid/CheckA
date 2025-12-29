@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from io import BytesIO
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="United Airlines - Materials Dashboard", layout="wide")
@@ -17,17 +16,22 @@ st.markdown("""
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
-    # Limpieza profunda de strings
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].astype(str).str.strip()
     return df
 
+# --- NORMALIZACIÓN DE CLAVES ---
+def norm_mne_series(s: pd.Series) -> pd.Series:
+    return (s.astype(str)
+              .str.upper()
+              .str.strip()
+              .str.replace(r"\s+", "", regex=True))
+
 # --- FUNCIÓN DE ESTILO ---
 def apply_custom_styling(df):
     if df.empty:
         return df
-    
     def highlight_logic(data):
         style_df = pd.DataFrame('', index=data.index, columns=data.columns)
         mask_critical = (data['faltante'] > data['QOH']) & (data['faltante'] > 0)
@@ -38,7 +42,6 @@ def apply_custom_styling(df):
             style_df.loc[mask_critical, col] = critical_style
             style_df.loc[mask_warning, col] = warning_style
         return style_df
-
     if len(df) > 800:
         return df
     return df.style.apply(highlight_logic, axis=None)
@@ -55,12 +58,8 @@ if file_stock and file_jobs:
     df_jobs = load_data(file_jobs)
 
     # --- PREPARACIÓN DE DATOS ---
-    df_stock['Mne_Dash8'] = df_stock['Mne_Dash8'].astype(str).str.strip()
-    df_jobs['mne_number'] = df_jobs['mne_number'].astype(str).str.strip()
-
-    # Normalización para asegurar coincidencias
-    df_stock['Mne_Dash8_norm'] = df_stock['Mne_Dash8'].str.upper()
-    df_jobs['mne_number_norm'] = df_jobs['mne_number'].str.upper()
+    df_stock['Mne_Dash8_norm'] = norm_mne_series(df_stock['Mne_Dash8'])
+    df_jobs['mne_number_norm'] = norm_mne_series(df_jobs['mne_number'])
 
     cols_num = ['QOH', 'required_part_quantity', 'planned_quantity']
     for c in cols_num:
@@ -113,13 +112,21 @@ if file_stock and file_jobs:
         st.dataframe(jobs_day[['mne_number', 'mne_description', 'package_description']], use_container_width=True, hide_index=True)
 
         st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
-        mne_list_del_dia = jobs_day['mne_number_norm'].dropna().unique().tolist()
-        mat_hoy = f_stock[f_stock['Mne_Dash8_norm'].isin(mne_list_del_dia)].reset_index(drop=True)
+        mats_for_day = (
+            f_stock.merge(
+                jobs_day[['mne_number_norm']].drop_duplicates(),
+                left_on='Mne_Dash8_norm',
+                right_on='mne_number_norm',
+                how='inner'
+            )
+        )
 
-        if not mat_hoy.empty:
-            st.info(f"Se encontraron {len(mat_hoy)} materiales asociados a las tareas programadas.")
-            styled_mat = apply_custom_styling(mat_hoy[v_cols])
+        if not mats_for_day.empty:
+            mats_for_day['faltante'] = (mats_for_day['required_part_quantity'] - mats_for_day['QOH']).clip(lower=0).astype(int)
+            mats_for_day['estado'] = mats_for_day['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+            styled_mat = apply_custom_styling(mats_for_day[v_cols])
             st.dataframe(styled_mat, use_container_width=True, column_config=col_config, hide_index=True)
+            st.info(f"Se encontraron {len(mats_for_day)} materiales asociados a las tareas programadas.")
         else:
             if len(jobs_day) == 0:
                 st.warning("No hay tareas programadas para la fecha seleccionada.")
