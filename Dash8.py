@@ -13,7 +13,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CARGA DE DATOS ---
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
@@ -22,18 +21,16 @@ def load_data(file):
             df[col] = df[col].astype(str).str.strip()
     return df
 
-# --- NORMALIZACIÓN DE CLAVES (evita "NAN" como coincidencia) ---
+# --- NORMALIZACIÓN DE CLAVES ---
 def norm_mne_series(s: pd.Series) -> pd.Series:
-    return (
-        s.fillna("")
-         .astype(str)
-         .str.upper()
-         .str.strip()
-         .str.replace(r"\s+", "", regex=True)
-         .replace("NAN", "")
-    )
+    return (s.fillna("")
+             .astype(str)
+             .str.upper()
+             .str.strip()
+             .str.replace(r"\s+", "", regex=True)
+             .replace("NAN", ""))
 
-# --- ESTILO CONDICIONAL ---
+# --- FUNCIÓN DE ESTILO ---
 def apply_custom_styling(df):
     if df.empty:
         return df
@@ -64,22 +61,20 @@ debug_mode = st.sidebar.checkbox("🛠️ Modo depuración", value=False)
 
 # --- APP ---
 if file_stock and file_jobs:
-    # Datos base
     df_stock = load_data(file_stock)
     df_jobs = load_data(file_jobs)
 
-    # Conversión numérica
+    # --- PREPARACIÓN GENERAL ---
     cols_num = ['QOH', 'required_part_quantity', 'planned_quantity']
     for c in cols_num:
         if c in df_stock.columns:
             df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
-    # Fechas y renombres
     if 'scheduled_date' in df_jobs.columns:
         df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date'], errors='coerce').dt.date
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
 
-    # Filtros de inventario (no descartan piezas sin MNE)
+    # --- FILTROS INVENTARIO ---
     st.sidebar.header("🔍 Buscadores por Comodín")
     w_mne = st.sidebar.text_input("Filtrar por MNE (Dash8)")
     w_desc = st.sidebar.text_input("Filtrar por Descripción")
@@ -89,29 +84,23 @@ if file_stock and file_jobs:
     if 'Mne_Dash8' in f_stock.columns and w_mne:
         f_stock = f_stock[f_stock['Mne_Dash8'].str.contains(w_mne, case=False, na=False)]
     if 'description' in f_stock.columns and w_desc:
-        f_stock = f_stock[f_stock['description'].str_contains(w_desc, case=False, na=False)]
-    if 'description' in f_stock.columns and w_desc and not 'str_contains' in dir(pd.Series.str):
-        # Fallback para algunas versiones de pandas: usar str.contains
         f_stock = f_stock[f_stock['description'].str.contains(w_desc, case=False, na=False)]
     if 'm_e' in f_stock.columns and w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
-    # Métricas de inventario
-    if {'required_part_quantity', 'QOH'}.issubset(f_stock.columns):
+    # Métricas inventario
+    if {'required_part_quantity','QOH'}.issubset(f_stock.columns):
         f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
         f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
     else:
         f_stock['faltante'] = 0
         f_stock['estado'] = "✅ OK"
 
-    # Columnas visibles
-    v_cols = [
-        'estado', 'm_e', 'description', 'QOH', 'required_part_quantity',
-        'faltante', 'OPEN ORDERS', 'REQUISITO', 'bin'
-    ]
+    v_cols = ['estado', 'm_e', 'description', 'QOH', 'required_part_quantity',
+              'faltante', 'OPEN ORDERS', 'REQUISITO', 'bin']
     v_cols = [c for c in v_cols if c in f_stock.columns]
 
-    # Pestañas
+    # --- PESTAÑAS ---
     tab1, tab2, tab3 = st.tabs(["📅 PLANIFICADOR DIARIO", "📦 STOCK COMPLETO", "📈 GRÁFICO"])
 
     col_config = {
@@ -138,39 +127,43 @@ if file_stock and file_jobs:
 
         jobs_day = df_jobs[df_jobs['scheduled_date'] == sel_date].copy() if sel_date and 'scheduled_date' in df_jobs.columns else df_jobs.iloc[0:0].copy()
 
-        # Normalización SOLO para planificador
         jobs_day['mne_number_norm'] = norm_mne_series(jobs_day['mne_number']) if 'mne_number' in jobs_day.columns else ""
         f_stock_plan = df_stock.copy()
         f_stock_plan['Mne_Dash8_norm'] = norm_mne_series(f_stock_plan['Mne_Dash8']) if 'Mne_Dash8' in f_stock_plan.columns else ""
 
-        # Claves válidas en planificador
         jobs_day = jobs_day[jobs_day['mne_number_norm'] != ""]
         f_stock_plan = f_stock_plan[f_stock_plan['Mne_Dash8_norm'] != ""]
 
-        # Mostrar trabajos del día
         st.subheader(f"Tareas Programadas para hoy ({len(jobs_day)})")
         show_jobs_cols = [c for c in ['mne_number', 'mne_description', 'package_description'] if c in jobs_day.columns]
         if len(show_jobs_cols) > 0:
             st.dataframe(jobs_day[show_jobs_cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("No hay columnas de descripción de tareas disponibles para mostrar.")
 
-        # Filtrar materiales por coincidencia exacta
         st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
         mne_set = set(jobs_day['mne_number_norm'].tolist())
-        if len(mne_set) == 0:
-            mats_for_day = f_stock_plan.iloc[0:0].copy()
-        else:
-            mats_for_day = f_stock_plan[f_stock_plan['Mne_Dash8_norm'].isin(mne_set)].copy()
+        mats_for_day = f_stock_plan[f_stock_plan['Mne_Dash8_norm'].isin(mne_set)].copy()
 
         if not mats_for_day.empty:
-            if {'required_part_quantity', 'QOH'}.issubset(mats_for_day.columns):
-                mats_for_day['faltante'] = (mats_for_day['required_part_quantity'] - mats_for_day['QOH']).clip(lower=0).astype(int)
-                mats_for_day['estado'] = mats_for_day['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
-            show_cols = [c for c in v_cols if c in mats_for_day.columns]
-            styled_mat = apply_custom_styling(mats_for_day[show_cols]) if len(show_cols) > 0 else mats_for_day
+            # Agrupar por Mne_Dash8 y Part Number, concatenando BINs únicos
+            mats_for_day_grouped = (
+                mats_for_day.groupby(['Mne_Dash8_norm','m_e'], as_index=False)
+                            .agg({
+                                'description': 'first',
+                                'QOH': 'sum',
+                                'required_part_quantity': 'sum',
+                                'OPEN ORDERS': 'sum',
+                                'REQUISITO': 'first',
+                                'bin': lambda x: ', '.join(sorted(set([str(v) for v in x if pd.notna(v)])))
+                            })
+            )
+
+            mats_for_day_grouped['faltante'] = (mats_for_day_grouped['required_part_quantity'] - mats_for_day_grouped['QOH']).clip(lower=0).astype(int)
+            mats_for_day_grouped['estado'] = mats_for_day_grouped['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+
+            show_cols = [c for c in v_cols if c in mats_for_day_grouped.columns]
+            styled_mat = apply_custom_styling(mats_for_day_grouped[show_cols])
             st.dataframe(styled_mat, use_container_width=True, column_config=col_config, hide_index=True)
-            st.info(f"Se encontraron {len(mats_for_day)} materiales asociados a las tareas programadas.")
+            st.info(f"Se encontraron {len(mats_for_day_grouped)} materiales agrupados por MNE.")
         else:
             if len(jobs_day) == 0:
                 st.warning("No hay tareas programadas para la fecha seleccionada.")
