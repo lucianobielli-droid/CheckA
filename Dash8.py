@@ -13,6 +13,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- CARGA DE DATOS ---
 @st.cache_data
 def load_data(file):
     df = pd.read_csv(file)
@@ -21,24 +22,15 @@ def load_data(file):
             df[col] = df[col].astype(str).str.strip()
     return df
 
-# --- NORMALIZACIÓN DE CLAVES ---
-# Ajusta estos flags según tu formato real
-KEEP_LEADING_ZEROS = True         # Pon False si NO deben compararse con ceros a la izquierda
-KEEP_HYPHENS = False              # Pon True si el guion '-' es significativo en tus MNE
-
+# --- NORMALIZACIÓN (solo para planificador) ---
 def norm_mne_series(s: pd.Series) -> pd.Series:
-    s = (s.astype(str)
-           .str.upper()
-           .str.strip()
-           .str.replace(r"\s+", "", regex=True))
-    if not KEEP_HYPHENS:
-        s = s.str.replace(r"[^A-Z0-9]", "", regex=True)  # quita todo lo no alfanumérico
-    # Si no queremos ceros a la izquierda, se remueven
-    if not KEEP_LEADING_ZEROS:
-        s = s.str.replace(r"^0+", "", regex=True)
-    return s
+    return (s.fillna("")
+             .astype(str)
+             .str.upper()
+             .str.strip()
+             .str.replace(r"\s+", "", regex=True))
 
-# --- FUNCIÓN DE ESTILO ---
+# --- ESTILO CONDICIONAL ---
 def apply_custom_styling(df):
     if df.empty:
         return df
@@ -62,46 +54,46 @@ st.sidebar.title("Material Control")
 
 file_stock = st.sidebar.file_uploader("1️⃣ EZESTOCK_FINAL (CSV)", type=["csv"])
 file_jobs = st.sidebar.file_uploader("2️⃣ WPEZE_Filter (CSV)", type=["csv"])
-debug_mode = st.sidebar.checkbox("🛠️ Modo depuración", value=False)
 
 if file_stock and file_jobs:
     df_stock = load_data(file_stock)
     df_jobs = load_data(file_jobs)
 
-    # --- PREPARACIÓN DE DATOS ---
-    # Normaliza claves para cruce
-    df_stock['Mne_Dash8_norm'] = norm_mne_series(df_stock['Mne_Dash8'])
-    df_jobs['mne_number_norm'] = norm_mne_series(df_jobs['mne_number'])
-
-    # Conversión numérica
+    # --- PREPARACIÓN GENERAL ---
+    # Numéricos
     cols_num = ['QOH', 'required_part_quantity', 'planned_quantity']
     for c in cols_num:
         if c in df_stock.columns:
             df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
-    # Fechas y renombrados
+    # Fechas y renombres
     df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date']).dt.date
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
 
-    # --- FILTROS DE SIDEBAR (comodines) ---
+    # --- FILTROS (Inventario completo) ---
     st.sidebar.header("🔍 Buscadores por Comodín")
     w_mne = st.sidebar.text_input("Filtrar por MNE (Dash8)")
     w_desc = st.sidebar.text_input("Filtrar por Descripción")
     w_me = st.sidebar.text_input("Filtrar por Part Number (m_e)")
 
     f_stock = df_stock.copy()
-    if w_mne:
+    if 'Mne_Dash8' in f_stock.columns and w_mne:
         f_stock = f_stock[f_stock['Mne_Dash8'].str.contains(w_mne, case=False, na=False)]
-    if w_desc:
+    if 'description' in f_stock.columns and w_desc:
         f_stock = f_stock[f_stock['description'].str.contains(w_desc, case=False, na=False)]
-    if w_me:
+    if 'm_e' in f_stock.columns and w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
-    # Métricas de faltantes y estado
-    f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
-    f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+    # Métricas
+    if {'required_part_quantity','QOH'}.issubset(f_stock.columns):
+        f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
+        f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+    else:
+        f_stock['faltante'] = 0
+        f_stock['estado'] = "✅ OK"
 
     v_cols = ['estado', 'm_e', 'description', 'QOH', 'required_part_quantity', 'faltante', 'OPEN ORDERS', 'REQUISITO', 'bin']
+    v_cols = [c for c in v_cols if c in f_stock.columns]  # asegurar cols existentes
 
     # --- PESTAÑAS ---
     tab1, tab2, tab3 = st.tabs(["📅 PLANIFICADOR DIARIO", "📦 STOCK COMPLETO", "📈 GRÁFICO"])
@@ -111,39 +103,53 @@ if file_stock and file_jobs:
         "m_e": st.column_config.TextColumn("PART NUMBER", width="medium"),
         "description": st.column_config.TextColumn("DESCRIPCIÓN", width="large"),
         "QOH": st.column_config.NumberColumn("STOCK ACT.", format="%d"),
+        "required_part_quantity": st.column_config.NumberColumn("REQ.", format="%d"),
         "faltante": st.column_config.NumberColumn("FALTANTE", format="%d"),
         "OPEN ORDERS": st.column_config.NumberColumn("O. ORDERS", format="%d"),
         "REQUISITO": st.column_config.TextColumn("REQUISITO"),
         "bin": st.column_config.TextColumn("BIN"),
     }
 
-    # --- TAB 1: PLANIFICADOR ---
+    # --- TAB 1: PLANIFICADOR (usa subset limpio) ---
     with tab1:
         st.markdown('<p class="main-header">Filtrado por Tareas Programadas</p>', unsafe_allow_html=True)
         fechas_disponibles = sorted(df_jobs['scheduled_date'].unique())
-        sel_date = st.date_input("Selecciona Fecha del Calendario:", value=fechas_disponibles[0] if fechas_disponibles else None)
+        sel_date = st.date_input(
+            "Selecciona Fecha del Calendario:",
+            value=fechas_disponibles[0] if len(fechas_disponibles) > 0 else None
+        )
 
         jobs_day = df_jobs[df_jobs['scheduled_date'] == sel_date].copy() if sel_date else df_jobs.iloc[0:0].copy()
 
+        # Normalización solo para planificador
+        jobs_day['mne_number_norm'] = norm_mne_series(jobs_day['mne_number']) if 'mne_number' in jobs_day.columns else ""
+        f_stock_plan = f_stock.copy()
+        f_stock_plan['Mne_Dash8_norm'] = norm_mne_series(f_stock_plan['Mne_Dash8']) if 'Mne_Dash8' in f_stock_plan.columns else ""
+
+        # Filtrar claves vacías solo en el subset de cruce
+        jobs_day = jobs_day[jobs_day['mne_number_norm'] != ""]
+        f_stock_plan = f_stock_plan[f_stock_plan['Mne_Dash8_norm'] != ""]
+
         st.subheader(f"Tareas Programadas para hoy ({len(jobs_day)})")
-        st.dataframe(
-            jobs_day[['mne_number', 'mne_description', 'package_description']],
-            use_container_width=True, hide_index=True
-        )
+        show_jobs_cols = [c for c in ['mne_number', 'mne_description', 'package_description'] if c in jobs_day.columns]
+        st.dataframe(jobs_day[show_jobs_cols], use_container_width=True, hide_index=True)
 
         st.subheader("📦 MATERIALES NECESARIOS PARA ESTAS TAREAS")
-        # Cruce determinista con merge sobre claves normalizadas
-        mats_for_day = f_stock.merge(
-            jobs_day[['mne_number_norm']].drop_duplicates(),
-            left_on='Mne_Dash8_norm',
-            right_on='mne_number_norm',
-            how='inner'
-        )
+        if len(jobs_day) > 0 and 'Mne_Dash8_norm' in f_stock_plan.columns and 'mne_number_norm' in jobs_day.columns:
+            mats_for_day = f_stock_plan.merge(
+                jobs_day[['mne_number_norm']].drop_duplicates(),
+                left_on='Mne_Dash8_norm',
+                right_on='mne_number_norm',
+                how='inner'
+            )
+        else:
+            mats_for_day = f_stock_plan.iloc[0:0].copy()
 
-        # Cálculo en subset
         if not mats_for_day.empty:
-            mats_for_day['faltante'] = (mats_for_day['required_part_quantity'] - mats_for_day['QOH']).clip(lower=0).astype(int)
-            mats_for_day['estado'] = mats_for_day['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+            # Recalcular métricas en subset por si v_cols las usa
+            if {'required_part_quantity','QOH'}.issubset(mats_for_day.columns):
+                mats_for_day['faltante'] = (mats_for_day['required_part_quantity'] - mats_for_day['QOH']).clip(lower=0).astype(int)
+                mats_for_day['estado'] = mats_for_day['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
             styled_mat = apply_custom_styling(mats_for_day[v_cols])
             st.dataframe(styled_mat, use_container_width=True, column_config=col_config, hide_index=True)
             st.info(f"Se encontraron {len(mats_for_day)} materiales asociados a las tareas programadas.")
@@ -153,19 +159,7 @@ if file_stock and file_jobs:
             else:
                 st.warning("No hay materiales en el almacén vinculados a los MNE de esta fecha.")
 
-        # --- DEPURACIÓN OPCIONAL ---
-        if debug_mode:
-            st.markdown("### 🛠️ Depuración de claves")
-            st.write("Muestras de stock (raw vs norm):", f_stock[['Mne_Dash8', 'Mne_Dash8_norm']].head(10))
-            st.write("Muestras de jobs (raw vs norm):", jobs_day[['mne_number', 'mne_number_norm']].head(10))
-            st.write("Unique stock MNE_norm:", f_stock['Mne_Dash8_norm'].nunique())
-            st.write("Unique jobs MNE_norm (día):", jobs_day['mne_number_norm'].nunique())
-            # Cuántos MNE del día están en el stock
-            in_stock_mask = jobs_day['mne_number_norm'].isin(f_stock['Mne_Dash8_norm'])
-            st.write("MNE del día presentes en stock:", jobs_day.loc[in_stock_mask, 'mne_number_norm'].unique().tolist())
-            st.write("MNE del día ausentes en stock:", jobs_day.loc[~in_stock_mask, 'mne_number_norm'].unique().tolist())
-
-    # --- TAB 2: STOCK COMPLETO ---
+    # --- TAB 2: STOCK COMPLETO (muestra todo) ---
     with tab2:
         st.markdown('<p class="main-header">Inventario General (Filtros Sidebar)</p>', unsafe_allow_html=True)
         df_gen = f_stock[v_cols].reset_index(drop=True)
@@ -179,15 +173,21 @@ if file_stock and file_jobs:
     with tab3:
         st.markdown('<p class="main-header">Gráfico de Stock vs Requerido</p>', unsafe_allow_html=True)
         df_plot = f_stock.head(25)
-        if not df_plot.empty:
+        if not df_plot.empty and {'m_e','QOH','required_part_quantity'}.issubset(df_plot.columns):
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=df_plot['m_e'], y=df_plot['QOH'], name='Stock Actual', marker_color='#005DAA'))
-            fig.add_trace(go.Scatter(x=df_plot['m_e'], y=df_plot['required_part_quantity'], mode='markers',
-                                     name='Requerido', marker=dict(symbol='star', size=12, color='orange')))
+            fig.add_trace(go.Bar(
+                x=df_plot['m_e'], y=df_plot['QOH'],
+                name='Stock Actual', marker_color='#005DAA'
+            ))
+            fig.add_trace(go.Scatter(
+                x=df_plot['m_e'], y=df_plot['required_part_quantity'],
+                mode='markers', name='Requerido',
+                marker=dict(symbol='star', size=12, color='orange')
+            ))
             fig.update_layout(xaxis_title="Part Number", yaxis_title="Cantidad", template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Sin datos para mostrar.")
+            st.warning("Sin datos suficientes para el gráfico.")
 
 else:
     st.info("👈 Por favor, carga los dos archivos CSV para iniciar.")
