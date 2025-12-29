@@ -7,7 +7,7 @@ from io import BytesIO
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="United Airlines - Materials Dashboard", layout="wide")
 
-# Inyección de CSS para forzar el ajuste de encabezados y estilos de tabla
+# Estilos CSS
 st.markdown("""
     <style>
     .stDataFrame th { white-space: normal !important; vertical-align: bottom !important; }
@@ -21,11 +21,16 @@ def load_data(file):
 
 def to_excel(df):
     output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Data')
+    # Intenta usar xlsxwriter, si falla usa openpyxl (por defecto en pandas moderno)
+    try:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Data')
+    except:
+        with pd.ExcelWriter(output) as writer:
+            df.to_excel(writer, index=False, sheet_name='Data')
     return output.getvalue()
 
-# --- CARGA DE ARCHIVOS ---
+# --- SIDEBAR ---
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/en/thumb/e/e0/United_Airlines_Logo.svg/1200px-United_Airlines_Logo.svg.png", width=200)
 st.sidebar.title("Control de Materiales")
 
@@ -36,12 +41,12 @@ if file_stock and file_jobs:
     df_stock = load_data(file_stock)
     df_jobs = load_data(file_jobs)
 
-    # --- LIMPIEZA Y PREPARACIÓN ---
-    # Limpiar llaves de cruce
+    # --- LIMPIEZA DE DATOS ---
+    # 1. Limpiar espacios en blanco en las columnas clave para asegurar el cruce
     df_stock['Mne_Dash8'] = df_stock['Mne_Dash8'].astype(str).str.strip()
     df_jobs['mne_number'] = df_jobs['mne_number'].astype(str).str.strip()
     
-    # Formatear números a enteros
+    # 2. Convertir numéricos y rellenar nulos
     cols_num = ['QOH', 'required_part_quantity', 'planned_quantity']
     for c in cols_num:
         if c in df_stock.columns:
@@ -49,17 +54,19 @@ if file_stock and file_jobs:
 
     df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date']).dt.date
     
-    # Renombrar columnas según solicitud
+    # 3. Renombrar columnas
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
-    
-    # --- FILTROS GLOBALES (SIDEBAR) ---
-    st.sidebar.header("🔍 Buscadores por Comodín")
+
+    # --- BARRA LATERAL: BUSCADORES ---
+    st.sidebar.header("🔍 Buscadores (Comodín)")
     w_mne = st.sidebar.text_input("Filtrar por MNE (Dash8)")
     w_desc = st.sidebar.text_input("Filtrar por Descripción")
     w_me = st.sidebar.text_input("Filtrar por Part Number (m_e)")
 
-    # Lógica de filtrado de Stock
+    # --- LÓGICA DE FILTRADO Y CÁLCULO ---
     f_stock = df_stock.copy()
+    
+    # Aplicar filtros si existen
     if w_mne:
         f_stock = f_stock[f_stock['Mne_Dash8'].str.contains(w_mne, case=False, na=False)]
     if w_desc:
@@ -67,17 +74,45 @@ if file_stock and file_jobs:
     if w_me:
         f_stock = f_stock[f_stock['m_e'].str.contains(w_me, case=False, na=False)]
 
-    # Cálculo de faltante
+    # Cálculos
     f_stock['faltante'] = (f_stock['required_part_quantity'] - f_stock['QOH']).clip(lower=0).astype(int)
-    f_stock['estado'] = f_stock['faltante'].apply(lambda x: "⚠️ PEDIR" if x > 0 else "✅ OK")
+    
+    # Definir estado básico para lógica interna
+    def get_status(row):
+        if row['faltante'] > 0:
+            return "⚠️ PEDIR"
+        return "✅ OK"
+    f_stock['estado'] = f_stock.apply(get_status, axis=1)
 
-    # Orden de columnas solicitado
+    # Columnas a mostrar
     v_cols = ['estado', 'm_e', 'description', 'QOH', 'required_part_quantity', 'faltante', 'OPEN ORDERS', 'REQUISITO', 'bin']
 
-    # --- NAVEGACIÓN ---
+    # --- FUNCIÓN DE RESALTADO (STYLE) ---
+    def highlight_rows(row):
+        # Creamos una lista de estilos vacía del mismo tamaño que la fila
+        styles = [''] * len(row)
+        
+        # Obtenemos valores de forma segura
+        faltante = row.get('faltante', 0)
+        qoh = row.get('QOH', 0)
+        
+        # CRITERIO 1: Faltante CRÍTICO (Faltante mayor que lo que tengo en mano)
+        # Nota: La lógica "faltante > QOH" implica que necesitas más de lo que tienes.
+        # Si 'faltante' ya es (Requerido - QOH), entonces si faltante > 0 ya es un problema.
+        # Pero si pides resaltar ESPECÍFICAMENTE cuando el hueco es mayor al stock actual:
+        if faltante > qoh and faltante > 0:
+            return ['background-color: #ffcccc; color: #b30000; font-weight: bold'] * len(row)
+        
+        # CRITERIO 2: Simplemente hay faltante
+        elif faltante > 0:
+            return ['background-color: #fff4e5'] * len(row)
+            
+        return styles
+
+    # --- PESTAÑAS ---
     tab1, tab2, tab3 = st.tabs(["📅 Planificador", "📦 Stock General", "📈 Gráfico Interactivo"])
 
-    # --- CONFIGURACIÓN DE TABLAS (Sin decimales y ajuste de ancho) ---
+    # Configuración visual de columnas
     col_config = {
         "estado": st.column_config.TextColumn("ESTADO", width="small"),
         "m_e": st.column_config.TextColumn("PART NUMBER (m_e)", width="medium"),
@@ -90,87 +125,83 @@ if file_stock and file_jobs:
         "bin": st.column_config.TextColumn("BIN")
     }
 
-    # Función de resaltado dinámico
-    def highlight_rows(row):
-        style = [''] * len(row)
-        # Resaltado CRÍTICO: Faltante > Stock Actual
-        if row['faltante'] > row['QOH'] and row['faltante'] > 0:
-            return ['background-color: #ffb3b3; color: black; font-weight: bold'] * len(row)
-        # Resaltado NORMAL: Solo necesita pedir
-        elif row['estado'] == "⚠️ PEDIR":
-            return ['background-color: #fff2cc'] * len(row)
-        return style
-
     # --- TAB 1: PLANIFICADOR ---
     with tab1:
-        st.markdown('<p class="main-header">📅 Trabajos Programados y Materiales</p>', unsafe_allow_html=True)
+        st.markdown('<p class="main-header">📅 Trabajos y Materiales</p>', unsafe_allow_html=True)
+        
         fechas = sorted(df_jobs['scheduled_date'].unique())
-        sel_date = st.date_input("Selecciona Fecha del Calendario:", value=fechas[0] if fechas else None)
+        sel_date = st.date_input("Selecciona Fecha:", value=fechas[0] if fechas else None)
 
-        # 1. Mostrar Trabajos del Día
+        # 1. Trabajos del día
         jobs_day = df_jobs[df_jobs['scheduled_date'] == sel_date].copy()
         
-        # Filtrar trabajos también por descripción si el buscador está activo
+        # Filtro adicional por descripción en trabajos
         if w_desc:
             jobs_day = jobs_day[jobs_day['mne_description'].str.contains(w_desc, case=False, na=False)]
 
         st.subheader(f"Actividades Programadas ({len(jobs_day)})")
         st.dataframe(jobs_day[['mne_number', 'mne_description', 'package_description']], use_container_width=True)
 
-        # 2. Mostrar Materiales Necesarios (Cruzando con MNE de los trabajos)
-        st.subheader("📦 Materiales Requeridos para estas Actividades")
+        # 2. Materiales (Cruce)
+        st.subheader("📦 Materiales Requeridos")
+        
+        # Obtener lista de MNEs de los trabajos visibles
         mne_list = jobs_day['mne_number'].unique()
         
-        # Filtramos la base de stock por los MNE del día y aplicamos los buscadores de la sidebar
+        # Filtrar stock usando esos MNEs (y respetando los filtros de la sidebar)
+        # Nota: Usamos f_stock para que ya tenga los filtros de texto aplicados si el usuario quiere refinar
         mat_hoy = f_stock[f_stock['Mne_Dash8'].isin(mne_list)].copy()
 
         if not mat_hoy.empty:
-            st.dataframe(mat_hoy[v_cols].style.apply(highlight_rows, axis=1), 
-                         use_container_width=True, column_config=col_config)
+            # IMPORTANTE: reset_index(drop=True) evita el error de StreamlitAPIException
+            st.dataframe(
+                mat_hoy[v_cols].reset_index(drop=True).style.apply(highlight_rows, axis=1), 
+                use_container_width=True, 
+                column_config=col_config
+            )
         else:
-            st.info("No se encontraron materiales cargados en stock para los MNE de esta fecha.")
+            st.info("No se encontraron materiales en stock asociados a estos códigos MNE.")
 
     # --- TAB 2: STOCK GENERAL ---
     with tab2:
-        st.markdown('<p class="main-header">📦 Análisis Completo de Inventario</p>', unsafe_allow_html=True)
-        st.dataframe(f_stock[v_cols].style.apply(highlight_rows, axis=1), 
-                     use_container_width=True, column_config=col_config)
+        st.markdown('<p class="main-header">📦 Análisis de Inventario</p>', unsafe_allow_html=True)
+        # Reset index para evitar el crash
+        st.dataframe(
+            f_stock[v_cols].reset_index(drop=True).style.apply(highlight_rows, axis=1), 
+            use_container_width=True, 
+            column_config=col_config
+        )
 
-    # --- TAB 3: GRÁFICO INTERACTIVO ---
+    # --- TAB 3: GRÁFICO ---
     with tab3:
-        st.markdown('<p class="main-header">📈 Comparativa de Disponibilidad</p>', unsafe_allow_html=True)
+        st.markdown('<p class="main-header">📈 Comparativa Visual</p>', unsafe_allow_html=True)
         
-        # El gráfico usa lo que ya está filtrado por los buscadores
-        df_plot = f_stock.copy().head(30) # Limitamos a 30 para legibilidad
+        # Usamos los datos filtrados
+        df_plot = f_stock.copy().head(40)
         
         if not df_plot.empty:
             fig = go.Figure()
             
-            # Barras de Stock
             fig.add_trace(go.Bar(
                 x=df_plot['m_e'], y=df_plot['QOH'],
-                name='Stock Actual (QOH)', marker_color='#005DAA',
-                hovertemplate="PN: %{x}<br>Stock: %{y}<extra></extra>"
+                name='Stock Actual', marker_color='#005DAA',
+                text=df_plot['QOH'], textposition='auto'
             ))
             
-            # Iconos de Requerimiento (Estrellas)
             fig.add_trace(go.Scatter(
                 x=df_plot['m_e'], y=df_plot['required_part_quantity'],
-                mode='markers', name='Requerido (Target)',
-                marker=dict(symbol='star', size=14, color='#FF8C00', line=dict(width=1, color='black')),
-                hovertemplate="PN: %{x}<br>Necesitas: %{y}<extra></extra>"
+                mode='markers', name='Requerido',
+                marker=dict(symbol='star', size=15, color='#FF8C00', line=dict(width=1, color='black'))
             ))
 
             fig.update_layout(
-                title="Top 30 Items (Filtrados por Buscadores)",
-                xaxis_title="Part Number (m_e)", yaxis_title="Cantidad",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                template="plotly_white", margin=dict(t=80)
+                title="Top 40 Items Filtrados",
+                xaxis_title="Part Number", yaxis_title="Cantidad",
+                template="plotly_white", height=500
             )
             st.plotly_chart(fig, use_container_width=True)
-            st.caption("Nota: El gráfico se actualiza en tiempo real con los buscadores de la barra lateral.")
         else:
-            st.warning("Aplica un filtro o busca un material para generar el gráfico.")
+            st.warning("No hay datos para mostrar con los filtros actuales.")
 
 else:
-    st.info("👈 Por favor, carga los dos archivos CSV para habilitar el tablero.")
+    st.info("👈 Carga los archivos CSV en la barra lateral.")
