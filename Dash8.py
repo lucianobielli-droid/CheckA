@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from pandas.io.formats.style import Styler   # ✅ Importación correcta para evitar AttributeError
+from pandas.io.formats.style import Styler  # Import correcto
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="United Airlines - Materials Dashboard", layout="wide")
@@ -59,16 +59,14 @@ if file_stock and file_jobs:
     df_jobs = load_data(file_jobs)
 
     # --- PREPARACIÓN GENERAL ---
-    # Asegurar numéricas
     for c in ['QOH','required_part_quantity','planned_quantity','Intransit_qty']:
         if c in df_stock.columns:
             df_stock[c] = pd.to_numeric(df_stock[c], errors='coerce').fillna(0).astype(int)
 
-    # Fechas jobs
     if 'scheduled_date' in df_jobs.columns:
         df_jobs['scheduled_date'] = pd.to_datetime(df_jobs['scheduled_date'], errors='coerce').dt.date
 
-    # Renombrar columnas para consistencia
+    # Renombrar para consistencia
     df_stock = df_stock.rename(columns={'planned_quantity': 'OPEN ORDERS', 'part_action': 'REQUISITO'})
 
     # --- FILTROS INVENTARIO ---
@@ -140,14 +138,12 @@ if file_stock and file_jobs:
     with tab1:
         st.markdown('<p class="main-header">Filtrado por Tareas Programadas</p>', unsafe_allow_html=True)
 
-        # Fechas disponibles
         fechas_disponibles = sorted(df_jobs['scheduled_date'].dropna().unique()) if 'scheduled_date' in df_jobs.columns else []
         sel_date = st.date_input(
             "Selecciona Fecha del Calendario:",
             value=fechas_disponibles[0] if len(fechas_disponibles) > 0 else None
         )
 
-        # Subset de tareas por fecha
         jobs_day = df_jobs[df_jobs['scheduled_date'] == sel_date].copy() if sel_date and 'scheduled_date' in df_jobs.columns else df_jobs.iloc[0:0].copy()
 
         st.subheader(f"Tareas Programadas para hoy ({len(jobs_day)})")
@@ -180,7 +176,6 @@ if file_stock and file_jobs:
         else:
             st.info("No hay materiales en estado ⚠️ PEDIR para descargar.")
 
-        # Depuración opcional
         if debug_mode:
             st.markdown("### 🛠️ Depuración")
             st.write("Inventario (muestras):", f_stock.head(10))
@@ -225,9 +220,6 @@ if file_stock and file_jobs:
                 st.warning("Sin datos para graficar.")
         else:
             st.warning("Faltan columnas necesarias para el gráfico: m_e, QOH y required_part_quantity.")
-
-else:
-    st.info("👈 Por favor, carga los archivos EZESTOCK_FINAL y WPEZE_Filter para iniciar.")
 
 else:
     st.info("👈 Por favor, carga los archivos EZESTOCK_FINAL y WPEZE_Filter para iniciar.")
